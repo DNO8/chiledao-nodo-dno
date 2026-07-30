@@ -7,6 +7,7 @@ import {
   MotionValue,
   type Variants,
   motion,
+  stagger,
   useScroll,
   useTransform,
 } from "motion/react"
@@ -18,7 +19,7 @@ interface ContainerScrollContextValue {
 }
 
 const SPRING_CONFIG = {
-  type: "spring",
+  type: "spring" as const,
   stiffness: 100,
   damping: 16,
   mass: 0.75,
@@ -166,7 +167,7 @@ export const ContainerStagger = React.forwardRef<
       whileInView={"visible"}
       viewport={{ once: viewport?.once ?? true, ...viewport }}
       transition={{
-        staggerChildren: transition?.staggerChildren || 0.2,
+        delayChildren: transition?.delayChildren ?? stagger(0.2),
         ...transition,
       }}
       {...props}

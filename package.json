@@ -31,7 +31,6 @@
     "@astrojs/check": "^0.9.10",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^6.0.5",
     "typescript": "^6.0.3"
   }
 }
