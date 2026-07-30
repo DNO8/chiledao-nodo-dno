@@ -53,6 +53,6 @@ export const journey: JourneySlide[] = [
     heading: "Cooperamos para enfrentar los desafíos del futuro.",
     description:
       "Ciencia, sostenibilidad y tecnología orientadas a un futuro que se construye con mirada de largo plazo.",
-    image: "avalanche-workshop-chiledao",
+    image: "vendimiatech-workshop-chiledao",
   },
 ];

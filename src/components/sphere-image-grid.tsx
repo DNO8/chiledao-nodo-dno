@@ -78,22 +78,19 @@ const seededRandom = (i: number): number => {
 const StaticGridFallback: React.FC<{ images: ImageData[] }> = ({ images }) => {
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
-      {images.map((image) => {
-        const base = image.src.replace(/^.*\//, '').replace(/\.(avif|webp|jpg|jpeg|png)$/i, '');
-        return (
-          <picture key={image.id} className="block aspect-square overflow-hidden rounded-lg">
-            <source srcSet={`/media/images/galeria/${base}.avif`} type="image/avif" />
-            <source srcSet={`/media/images/galeria/${base}.webp`} type="image/webp" />
-            <img
-              src={`/media/images/galeria/${base}.jpg`}
-              alt={image.alt}
-              className="h-full w-full object-cover"
-              loading="lazy"
-              decoding="async"
-            />
-          </picture>
-        );
-      })}
+      {images.map((image) => (
+        <picture key={image.id} className="block aspect-square overflow-hidden rounded-lg">
+          <source srcSet={`${image.src}.avif`} type="image/avif" />
+          <source srcSet={`${image.src}.webp`} type="image/webp" />
+          <img
+            src={`${image.src}.jpg`}
+            alt={image.alt}
+            className="h-full w-full object-cover"
+            loading="lazy"
+            decoding="async"
+          />
+        </picture>
+      ))}
     </div>
   );
 };
@@ -334,7 +331,6 @@ const SphereImageGrid: React.FC<SphereImageGridProps> = ({
     const imageSize = baseImageSize * position.scale;
     const isHovered = hoveredIndex === index;
     const finalScale = isHovered ? Math.min(hoverScale, hoverScale / position.scale) : 1;
-    const base = image.src.replace(/^.*\//, '').replace(/\.(avif|webp|jpg|jpeg|png)$/i, '');
     return (
       <div
         key={image.id}
@@ -352,9 +348,15 @@ const SphereImageGrid: React.FC<SphereImageGridProps> = ({
       >
         <div className="relative w-full h-full rounded-lg overflow-hidden shadow-lg border-2 border-white/20">
           <picture>
-            <source srcSet={`/media/images/galeria/${base}.avif`} type="image/avif" />
-            <source srcSet={`/media/images/galeria/${base}.webp`} type="image/webp" />
-            <img src={`/media/images/galeria/${base}.jpg`} alt={image.alt} className="w-full h-full object-cover" draggable={false} loading={index < 3 ? 'eager' : 'lazy'} />
+            <source srcSet={`${image.src}.avif`} type="image/avif" />
+            <source srcSet={`${image.src}.webp`} type="image/webp" />
+            <img
+              src={`${image.src}.jpg`}
+              alt={image.alt}
+              className="w-full h-full object-cover"
+              draggable={false}
+              loading={index < 3 ? 'eager' : 'lazy'}
+            />
           </picture>
         </div>
       </div>
@@ -363,15 +365,14 @@ const SphereImageGrid: React.FC<SphereImageGridProps> = ({
 
   const renderSpotlightModal = () => {
     if (!selectedImage) return null;
-    const base = selectedImage.src.replace(/^.*\//, '').replace(/\.(avif|webp|jpg|jpeg|png)$/i, '');
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30" onClick={() => setSelectedImage(null)} style={{ animation: 'fadeIn 0.3s ease-out' }}>
         <div className="bg-white rounded-xl max-w-md w-full overflow-hidden" onClick={(e) => e.stopPropagation()} style={{ animation: 'scaleIn 0.3s ease-out' }}>
           <div className="relative aspect-square">
             <picture>
-              <source srcSet={`/media/images/galeria/${base}.avif`} type="image/avif" />
-              <source srcSet={`/media/images/galeria/${base}.webp`} type="image/webp" />
-              <img src={`/media/images/galeria/${base}.jpg`} alt={selectedImage.alt} className="w-full h-full object-cover" />
+              <source srcSet={`${selectedImage.src}.avif`} type="image/avif" />
+              <source srcSet={`${selectedImage.src}.webp`} type="image/webp" />
+              <img src={`${selectedImage.src}.jpg`} alt={selectedImage.alt} className="w-full h-full object-cover" />
             </picture>
             <button onClick={() => setSelectedImage(null)} className="absolute top-2 right-2 w-8 h-8 bg-black bg-opacity-50 rounded-full text-white flex items-center justify-center hover:bg-opacity-70 transition-all cursor-pointer">
               <X size={16} />

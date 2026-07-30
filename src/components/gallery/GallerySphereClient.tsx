@@ -9,12 +9,12 @@ function formatAlt(name: string) {
 }
 
 export default function GallerySphereClient() {
-  const [containerSize, setContainerSize] = React.useState(320)
+  const [containerSize, setContainerSize] = React.useState(300)
 
   React.useEffect(() => {
     const update = () => {
       const isDesktop = window.matchMedia("(min-width: 768px)").matches
-      setContainerSize(isDesktop ? 600 : 320)
+      setContainerSize(isDesktop ? 500 : 300)
     }
     update()
     const mq = window.matchMedia("(min-width: 768px)")
@@ -26,7 +26,7 @@ export default function GallerySphereClient() {
     () =>
       galeria.slice(0, 20).map((name) => ({
         id: name,
-        src: `/media/images/galeria/${name}.jpg`,
+        src: `/media/images/galeria/${name}`,
         alt: formatAlt(name),
       })),
     []

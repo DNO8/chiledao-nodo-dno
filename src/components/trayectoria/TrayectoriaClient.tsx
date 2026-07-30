@@ -4,17 +4,17 @@ import { motion, useReducedMotion, useScroll, useTransform } from 'motion/react'
 import { trayectoria } from '../../data';
 
 const X1 = 20;
-const Y1 = 168;
+const Y1 = 240;
 const X2 = 980;
-const Y2 = 456;
+const Y2 = 240;
 const PATH_LENGTH = Math.hypot(X2 - X1, Y2 - Y1);
 
 const MILESTONES = [
-  { left: '2%', top: '35%', height: 50 },
+  { left: '2%', top: '50%', height: 50 },
   { left: '26%', top: '50%', height: 100 },
-  { left: '50%', top: '65%', height: 70 },
-  { left: '74%', top: '80%', height: 120 },
-  { left: '98%', top: '95%', height: 90 },
+  { left: '50%', top: '50%', height: 70 },
+  { left: '74%', top: '50%', height: 120 },
+  { left: '98%', top: '50%', height: 90 },
 ];
 
 function VerticalTimeline() {
@@ -83,7 +83,7 @@ export default function TrayectoriaClient() {
           <svg
             className="absolute inset-0 w-full h-full"
             viewBox="0 0 1000 480"
-            preserveAspectRatio="none"
+            preserveAspectRatio="xMidYMid meet"
             aria-hidden="true"
           >
             <line
