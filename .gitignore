@@ -26,3 +26,6 @@ pnpm-debug.log*
 
 # atlas / opencode workspace metadata
 .atl/
+
+# Read-only reference sources copied in for content migration (not shipped)
+.sources/

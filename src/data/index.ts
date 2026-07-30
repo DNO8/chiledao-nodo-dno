@@ -1,0 +1,10 @@
+export { site, type Site } from "./site";
+export { pilares, type Pilar } from "./pilares";
+export { objetivos, type Objetivo } from "./objetivos";
+export { desafios, type Desafio } from "./desafios";
+export { servicios, type Servicio } from "./servicios";
+export { equipo, type Miembro } from "./equipo";
+export { alianzas, type Alianza } from "./alianzas";
+export { faq, type FaqItem } from "./faq";
+export { trayectoria, type TrayectoriaItem } from "./trayectoria";
+export { journey, type JourneySlide } from "./journey";
