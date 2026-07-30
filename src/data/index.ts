@@ -8,3 +8,5 @@ export { alianzas, type Alianza } from "./alianzas";
 export { faq, type FaqItem } from "./faq";
 export { trayectoria, type TrayectoriaItem } from "./trayectoria";
 export { journey, type JourneySlide } from "./journey";
+export { galeria, type GaleriaImage } from "./galeria";
+export { testimonios, type Testimonio } from "./testimonios";

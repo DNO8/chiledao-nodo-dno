@@ -1,0 +1,19 @@
+---
+import TestimonialCards from './TestimonialCards';
+---
+
+<section id="testimonios" class="bg-navy-soft py-20 md:py-32" aria-labelledby="testimonios-heading">
+  <div class="max-w-[var(--container-w)] mx-auto px-6">
+    <div class="mb-12 md:mb-16">
+      <p class="font-mono text-sm uppercase tracking-widest text-red mb-4">Voces de la comunidad</p>
+      <h2 id="testimonios-heading" class="font-heading text-3xl md:text-4xl lg:text-5xl font-bold tracking-tight text-white-warm">
+        Testimonios
+      </h2>
+      <p class="text-lg text-paper/70 mt-4 max-w-2xl">
+        Experiencias de quienes han participado en nuestras actividades y construyen junto a ChileDAO.
+      </p>
+    </div>
+
+    <TestimonialCards client:visible />
+  </div>
+</section>
