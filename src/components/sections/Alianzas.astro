@@ -1,0 +1,57 @@
+---
+import { alianzas } from '../../data';
+
+function getInitials(name: string): string {
+  const significant = name
+    .replace(/\([^)]*\)/g, '')
+    .replace(/de|la|del|y|e|U\./gi, ' ')
+    .trim();
+  return significant
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((word) => word[0]?.toUpperCase())
+    .join('');
+}
+---
+
+<section id="alianzas" class="bg-paper py-20 md:py-32" aria-labelledby="alianzas-heading">
+  <div class="max-w-[var(--container-w)] mx-auto px-6">
+    <div class="mb-12 md:mb-16">
+      <p class="font-mono text-sm uppercase tracking-widest text-red mb-4">Aliados estratégicos</p>
+      <h2 id="alianzas-heading" class="font-heading text-3xl md:text-4xl lg:text-5xl font-bold tracking-tight text-ink">
+        Alianzas
+      </h2>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 lg:gap-8 mb-16 md:mb-24">
+      {alianzas.map((alianza) => (
+        <article class="bg-white-warm border border-line/20 rounded-lg p-6 md:p-8">
+          <div class="w-16 h-16 rounded-lg bg-muted/20 flex items-center justify-center mb-6">
+            <span class="font-heading text-2xl font-bold text-muted">{getInitials(alianza.name)}</span>
+          </div>
+          <h3 class="font-heading text-lg font-semibold tracking-tight text-ink mb-3">
+            {alianza.name}
+          </h3>
+          <p class="text-ink/70 leading-relaxed">{alianza.description}</p>
+        </article>
+      ))}
+    </div>
+
+    <div class="border-t border-line/30 pt-12 md:pt-16">
+      <h3 class="font-heading text-xl md:text-2xl font-semibold tracking-tight text-ink mb-6">
+        Protocolos que enseñamos
+      </h3>
+      <!--
+        TODO: Logos de protocolos blockchain
+        Agregar aquí los logos de Polkadot, Avalanche, Ethereum, Stellar, etc.
+      -->
+      <div class="flex flex-wrap gap-4">
+        <span class="inline-flex items-center px-4 py-2 bg-muted/10 text-muted rounded-full text-sm font-medium">Polkadot</span>
+        <span class="inline-flex items-center px-4 py-2 bg-muted/10 text-muted rounded-full text-sm font-medium">Avalanche</span>
+        <span class="inline-flex items-center px-4 py-2 bg-muted/10 text-muted rounded-full text-sm font-medium">Ethereum</span>
+        <span class="inline-flex items-center px-4 py-2 bg-muted/10 text-muted rounded-full text-sm font-medium">Stellar</span>
+      </div>
+    </div>
+  </div>
+</section>

@@ -1,0 +1,42 @@
+---
+import { site } from '../../data';
+
+const socialLabels = ['Linktree', 'Discord landing', 'Discord participa', 'WhatsApp group'];
+const socialLinks = site.externalUrls.filter((link) => socialLabels.includes(link.label));
+---
+
+<section id="contacto" class="bg-navy py-20 md:py-32" aria-labelledby="contacto-heading">
+  <div class="max-w-[var(--container-w)] mx-auto px-6">
+    <div class="max-w-3xl">
+      <p class="font-mono text-sm uppercase tracking-widest text-red mb-4">Hablemos</p>
+      <h2 id="contacto-heading" class="font-heading text-3xl md:text-4xl lg:text-5xl font-bold tracking-tight text-white-warm mb-6">
+        Conecta con ChileDAO Nodo DNO
+      </h2>
+      <p class="text-lg md:text-xl text-paper/80 leading-relaxed mb-10">
+        ¿Tienes un proyecto, una idea o quieres colaborar? Escríbenos y construyamos el ecosistema Web3 chileno juntos.
+      </p>
+
+      <a
+        href={`mailto:${site.contactEmail}`}
+        class="inline-block font-heading text-2xl md:text-4xl font-bold text-white-warm hover:text-red focus:outline-none focus-visible:ring-2 focus-visible:ring-red rounded transition-colors mb-12"
+      >
+        {site.contactEmail}
+      </a>
+
+      {socialLinks.length > 0 && (
+        <div class="flex flex-wrap gap-3">
+          {socialLinks.map((link) => (
+            <a
+              href={link.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              class="inline-flex items-center px-5 py-3 text-base font-medium bg-navy-soft text-paper hover:bg-red hover:text-white-warm focus:outline-none focus-visible:ring-2 focus-visible:ring-red rounded-lg transition-colors"
+            >
+              {link.label.replace(' landing', '').replace(' participa', '').replace(' group', '')}
+            </a>
+          ))}
+        </div>
+      )}
+    </div>
+  </div>
+</section>

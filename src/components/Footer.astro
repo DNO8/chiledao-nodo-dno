@@ -1,0 +1,87 @@
+---
+import { site } from '../data';
+
+const currentYear = new Date().getFullYear();
+
+const quickLinks = [
+  { href: '#about', label: 'Sobre nosotros' },
+  { href: '#pilares', label: 'Pilares' },
+  { href: '#objetivos', label: 'Objetivos' },
+  { href: '#servicios', label: 'Servicios' },
+  { href: '#trayectoria', label: 'Trayectoria' },
+  { href: '#alianzas', label: 'Alianzas' },
+  { href: '#equipo', label: 'Equipo' },
+  { href: '#faq', label: 'FAQ' },
+  { href: '#contacto', label: 'Contacto' },
+];
+
+const socialLabels = ['Linktree', 'Discord landing', 'Discord participa', 'WhatsApp group'];
+const socialLinks = site.externalUrls.filter((link) => socialLabels.includes(link.label));
+---
+
+<footer class="bg-navy text-paper">
+  <div class="max-w-[var(--container-w)] mx-auto px-6 py-16 md:py-20">
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-12 md:gap-8">
+      <div class="space-y-4">
+        <h2 class="font-heading text-2xl font-bold tracking-tight">
+          {site.orgName} <span class="text-red">Nodo DNO</span>
+        </h2>
+        <span class="inline-block px-3 py-1 text-xs font-mono uppercase tracking-widest bg-red/10 text-red rounded">
+          {site.legalStatus}
+        </span>
+        <p class="text-paper/80 max-w-sm">{site.tagline}</p>
+      </div>
+
+      <div class="space-y-4">
+        <h3 class="font-heading text-lg font-semibold tracking-tight">Enlaces rápidos</h3>
+        <ul class="space-y-2">
+          {quickLinks.map((link) => (
+            <li>
+              <a
+                href={link.href}
+                class="text-paper/80 hover:text-white-warm focus:outline-none focus-visible:ring-2 focus-visible:ring-red rounded transition-colors"
+              >
+                {link.label}
+              </a>
+            </li>
+          ))}
+        </ul>
+      </div>
+
+      <div class="space-y-4">
+        <h3 class="font-heading text-lg font-semibold tracking-tight">Contacto</h3>
+        <p>
+          <a
+            href={`mailto:${site.contactEmail}`}
+            class="text-paper/80 hover:text-white-warm focus:outline-none focus-visible:ring-2 focus-visible:ring-red rounded transition-colors"
+          >
+            {site.contactEmail}
+          </a>
+        </p>
+        {socialLinks.length > 0 && (
+          <ul class="flex flex-wrap gap-3">
+            {socialLinks.map((link) => (
+              <li>
+                <a
+                  href={link.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  class="inline-block px-3 py-1.5 text-sm font-medium bg-navy-soft text-paper/90 hover:bg-red hover:text-white-warm focus:outline-none focus-visible:ring-2 focus-visible:ring-red rounded transition-colors"
+                >
+                  {link.label.replace(' landing', '').replace(' participa', '').replace(' group', '')}
+                </a>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </div>
+  </div>
+
+  <div class="border-t border-line/20">
+    <div class="max-w-[var(--container-w)] mx-auto px-6 py-6 flex flex-col md:flex-row items-center justify-between gap-4 text-sm text-paper/60">
+      <p>ChileDAO Nodo DNO</p>
+      <p>{currentYear}</p>
+    </div>
+  </div>
+</footer>

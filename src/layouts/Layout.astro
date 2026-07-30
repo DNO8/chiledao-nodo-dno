@@ -1,26 +1,48 @@
 ---
 import '../styles/global.css';
+import { site } from '../data';
 
 interface Props {
   title?: string;
   description?: string;
 }
 
-const { title = 'ChileDAO Nodo DNO', description = 'ChileDAO Nodo DNO placeholder' } = Astro.props;
+const {
+  title = 'ChileDAO Nodo DNO',
+  description = site.tagline,
+} = Astro.props;
+const ogTitle = title;
+const ogDescription = description;
 ---
 
 <!doctype html>
-<html lang="en">
+<html lang="es">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content={description} />
     <meta name="generator" content={Astro.generator} />
+
+    <meta property="og:title" content={ogTitle} />
+    <meta property="og:description" content={ogDescription} />
+    <meta property="og:type" content="website" />
+    <meta property="og:locale" content="es_CL" />
+
     <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
     <link rel="icon" href="/favicon.ico" />
+
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link rel="preload" href="/node_modules/@fontsource/inter/files/inter-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/node_modules/@fontsource/sora/files/sora-latin-500-normal.woff2" as="font" type="font/woff2" crossorigin />
+    <link rel="preload" href="/node_modules/@fontsource/geist-mono/files/geist-mono-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin />
+
     <title>{title}</title>
   </head>
   <body>
+    <a href="#main-content" class="sr-only focus:not-sr-only focus:absolute focus:top-4 focus:left-4 focus:z-50 focus:bg-paper focus:text-ink focus:px-4 focus:py-2 focus:rounded focus:outline-none focus:ring-2 focus:ring-red">
+      Saltar al contenido principal
+    </a>
     <slot />
   </body>
 </html>

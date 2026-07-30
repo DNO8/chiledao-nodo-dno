@@ -1,0 +1,32 @@
+---
+import { faq } from '../../data';
+---
+
+<section id="faq" class="bg-paper py-20 md:py-32" aria-labelledby="faq-heading">
+  <div class="max-w-[var(--container-w)] mx-auto px-6">
+    <div class="mb-12 md:mb-16">
+      <p class="font-mono text-sm uppercase tracking-widest text-red mb-4">Preguntas frecuentes</p>
+      <h2 id="faq-heading" class="font-heading text-3xl md:text-4xl lg:text-5xl font-bold tracking-tight text-ink">
+        FAQ
+      </h2>
+    </div>
+
+    <div class="space-y-4 max-w-3xl">
+      {faq.map((item) => (
+        <details class="group bg-white-warm border border-line/20 rounded-lg open:ring-1 open:ring-red/20">
+          <summary class="cursor-pointer list-none p-5 md:p-6 flex items-center justify-between gap-4 font-heading text-lg md:text-xl font-semibold tracking-tight text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-red rounded-lg">
+            {item.question}
+            <span class="flex-shrink-0 w-6 h-6 rounded-full bg-red/10 text-red flex items-center justify-center transition-transform group-open:rotate-180" aria-hidden="true">
+              <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" d="M19 9l-7 7-7-7" />
+              </svg>
+            </span>
+          </summary>
+          <div class="px-5 md:px-6 pb-5 md:pb-6 text-ink/80 leading-relaxed">
+            <p set:html={item.answer} />
+          </div>
+        </details>
+      ))}
+    </div>
+  </div>
+</section>

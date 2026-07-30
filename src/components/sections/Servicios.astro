@@ -1,0 +1,62 @@
+---
+import { servicios } from '../../data';
+
+const categories = ['educación', 'incubación', 'alianzas'];
+const categoryLabels: Record<string, string> = {
+  educación: 'Educación',
+  incubación: 'Incubación',
+  alianzas: 'Alianzas',
+};
+
+const grouped = categories.map((category) => ({
+  category,
+  label: categoryLabels[category],
+  items: servicios.filter((s) => s.category === category),
+}));
+---
+
+<section id="servicios" class="bg-paper py-20 md:py-32" aria-labelledby="servicios-heading">
+  <div class="max-w-[var(--container-w)] mx-auto px-6">
+    <div class="mb-12 md:mb-16">
+      <p class="font-mono text-sm uppercase tracking-widest text-red mb-4">Qué ofrecemos</p>
+      <h2 id="servicios-heading" class="font-heading text-3xl md:text-4xl lg:text-5xl font-bold tracking-tight text-ink">
+        Servicios para la comunidad Web3
+      </h2>
+    </div>
+
+    <div class="space-y-12 md:space-y-16">
+      {grouped.map((group) => (
+        <div>
+          <h3 class="font-heading text-xl md:text-2xl font-semibold tracking-tight text-ink mb-6 flex items-center gap-3">
+            <span class="w-2 h-2 rounded-full bg-red" />
+            {group.label}
+          </h3>
+          <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 lg:gap-8">
+            {group.items.map((servicio) => (
+              <article class="bg-white-warm border border-line/20 rounded-lg p-6 md:p-8 flex flex-col">
+                <p class="font-mono text-sm uppercase tracking-widest text-red mb-3">{servicio.code}</p>
+                <h4 class="font-heading text-lg font-semibold tracking-tight text-ink mb-3">
+                  {servicio.title}
+                </h4>
+                <p class="text-ink/70 leading-relaxed flex-grow">{servicio.description}</p>
+                {servicio.link && (
+                  <a
+                    href={servicio.link}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    class="mt-4 inline-flex items-center text-sm font-medium text-red hover:text-ink focus:outline-none focus-visible:ring-2 focus-visible:ring-red rounded transition-colors"
+                  >
+                    Ver más
+                    <svg class="w-4 h-4 ml-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+                      <path stroke-linecap="round" stroke-linejoin="round" d="M7 17L17 7M17 7H7M17 7v10" />
+                    </svg>
+                  </a>
+                )}
+              </article>
+            ))}
+          </div>
+        </div>
+      ))}
+    </div>
+  </div>
+</section>

@@ -1,0 +1,38 @@
+---
+import { trayectoria } from '../../data';
+---
+
+<section id="trayectoria" class="bg-navy-soft py-20 md:py-32" aria-labelledby="trayectoria-heading">
+  <div class="max-w-[var(--container-w)] mx-auto px-6">
+    <div class="mb-12 md:mb-16">
+      <p class="font-mono text-sm uppercase tracking-widest text-red mb-4">Nuestra historia</p>
+      <h2 id="trayectoria-heading" class="font-heading text-3xl md:text-4xl lg:text-5xl font-bold tracking-tight text-white-warm">
+        Trayectoria
+      </h2>
+    </div>
+
+    <div class="relative pl-8 md:pl-12">
+      <div class="absolute left-[11px] md:left-[15px] top-2 bottom-2 w-px bg-line/30" aria-hidden="true" />
+      <ol class="space-y-10 md:space-y-12">
+        {trayectoria.map((item) => (
+          <li class="relative">
+            <span class="absolute -left-8 md:-left-12 top-1 w-6 h-6 rounded-full bg-red ring-4 ring-navy-soft" aria-hidden="true" />
+            <div class="flex flex-col md:flex-row md:items-baseline gap-2 md:gap-6 mb-2">
+              <span class="font-heading text-3xl md:text-4xl font-bold text-red">{item.year}</span>
+              <h3 class="font-heading text-xl md:text-2xl font-semibold tracking-tight text-white-warm">
+                {item.title}
+              </h3>
+            </div>
+            <p class="text-paper/80 leading-relaxed max-w-3xl">{item.description}</p>
+          </li>
+        ))}
+      </ol>
+    </div>
+
+    <!--
+      TODO: Road to sub0
+      Agregar aquí los KPIs del camino a sub0 y el evento BSL (5-7 de agosto)
+      cuando los contenidos estén definidos.
+    -->
+  </div>
+</section>

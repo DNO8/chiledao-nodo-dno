@@ -1,0 +1,30 @@
+---
+import { desafios } from '../../data';
+---
+
+<section id="desafios" class="bg-navy py-20 md:py-32" aria-labelledby="desafios-heading">
+  <div class="max-w-[var(--container-w)] mx-auto px-6">
+    <div class="mb-12 md:mb-16">
+      <p class="font-mono text-sm uppercase tracking-widest text-red mb-4">Retos 2026</p>
+      <h2 id="desafios-heading" class="font-heading text-3xl md:text-4xl lg:text-5xl font-bold tracking-tight text-white-warm">
+        Desafíos que estamos resolviendo
+      </h2>
+    </div>
+
+    <ol class="space-y-6 md:space-y-8">
+      {desafios.map((desafio) => (
+        <li class="flex gap-6 md:gap-8 items-start">
+          <span class="flex-shrink-0 font-heading text-4xl md:text-5xl font-bold text-red w-16 md:w-20">
+            {desafio.number.toString().padStart(2, '0')}
+          </span>
+          <div class="pt-1 md:pt-2">
+            <h3 class="font-heading text-xl md:text-2xl font-semibold tracking-tight text-white-warm mb-2">
+              {desafio.title}
+            </h3>
+            <p class="text-paper/80 leading-relaxed max-w-3xl">{desafio.description}</p>
+          </div>
+        </li>
+      ))}
+    </ol>
+  </div>
+</section>

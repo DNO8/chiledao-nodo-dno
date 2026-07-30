@@ -1,0 +1,29 @@
+---
+import { objetivos } from '../../data';
+---
+
+<section id="objetivos" class="bg-paper py-20 md:py-32" aria-labelledby="objetivos-heading">
+  <div class="max-w-[var(--container-w)] mx-auto px-6">
+    <div class="mb-12 md:mb-16">
+      <p class="font-mono text-sm uppercase tracking-widest text-red mb-4">Objetivos estratégicos</p>
+      <h2 id="objetivos-heading" class="font-heading text-3xl md:text-4xl lg:text-5xl font-bold tracking-tight text-ink">
+        Nueve objetivos para transformar el ecosistema
+      </h2>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6 lg:gap-8">
+      {objetivos.map((objetivo) => (
+        <article class="bg-white-warm border border-line/20 rounded-lg p-6 md:p-8">
+          <div class="flex items-center justify-between mb-3">
+            <p class="font-mono text-sm uppercase tracking-widest text-red">{objetivo.code}</p>
+            <p class="text-xs font-medium text-muted uppercase tracking-wide">{objetivo.category}</p>
+          </div>
+          <h3 class="font-heading text-xl font-semibold tracking-tight text-ink mb-3">
+            {objetivo.title}
+          </h3>
+          <p class="text-ink/70 leading-relaxed">{objetivo.description}</p>
+        </article>
+      ))}
+    </div>
+  </div>
+</section>

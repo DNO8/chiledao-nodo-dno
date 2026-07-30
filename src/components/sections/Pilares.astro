@@ -1,0 +1,26 @@
+---
+import { pilares } from '../../data';
+---
+
+<section id="pilares" class="bg-navy-soft py-20 md:py-32" aria-labelledby="pilares-heading">
+  <div class="max-w-[var(--container-w)] mx-auto px-6">
+    <div class="mb-12 md:mb-16">
+      <p class="font-mono text-sm uppercase tracking-widest text-red mb-4">Nuestros pilares</p>
+      <h2 id="pilares-heading" class="font-heading text-3xl md:text-4xl lg:text-5xl font-bold tracking-tight text-white-warm">
+        Educación, incubación y comunidad
+      </h2>
+    </div>
+
+    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 lg:gap-8">
+      {pilares.map((pilar) => (
+        <article class="bg-navy/50 border border-line/20 rounded-lg p-6 md:p-8">
+          <p class="font-mono text-sm uppercase tracking-widest text-red mb-4">{pilar.code}</p>
+          <h3 class="font-heading text-xl md:text-2xl font-semibold tracking-tight text-white-warm mb-3">
+            {pilar.title}
+          </h3>
+          <p class="text-paper/80 leading-relaxed">{pilar.description}</p>
+        </article>
+      ))}
+    </div>
+  </div>
+</section>

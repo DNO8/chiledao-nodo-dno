@@ -1,0 +1,99 @@
+---
+import { site } from '../data';
+
+const navLinks = [
+  { href: '#about', label: 'Sobre nosotros' },
+  { href: '#pilares', label: 'Pilares' },
+  { href: '#objetivos', label: 'Objetivos' },
+  { href: '#servicios', label: 'Servicios' },
+  { href: '#trayectoria', label: 'Trayectoria' },
+  { href: '#alianzas', label: 'Alianzas' },
+  { href: '#equipo', label: 'Equipo' },
+  { href: '#faq', label: 'FAQ' },
+  { href: '#contacto', label: 'Contacto' },
+];
+---
+
+<header class="sticky top-0 z-40 bg-navy text-paper transition-all duration-200">
+  <div class="max-w-[var(--container-w)] mx-auto px-6 flex items-center justify-between h-16 md:h-20">
+    <a href="/" class="font-heading font-bold text-xl md:text-2xl tracking-tight focus:outline-none focus-visible:ring-2 focus-visible:ring-red rounded px-1 -ml-1">
+      {site.orgName} <span class="text-red">Nodo DNO</span>
+    </a>
+
+    <nav aria-label="Principal" class="hidden md:flex items-center gap-1">
+      {navLinks.map((link) => (
+        <a
+          href={link.href}
+          class="px-3 py-2 text-sm font-medium text-paper/90 hover:text-white-warm focus:outline-none focus-visible:ring-2 focus-visible:ring-red rounded transition-colors"
+        >
+          {link.label}
+        </a>
+      ))}
+    </nav>
+
+    <button
+      id="menu-toggle"
+      type="button"
+      class="md:hidden p-2 rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-red"
+      aria-expanded="false"
+      aria-controls="mobile-menu"
+      aria-label="Abrir menú de navegación"
+    >
+      <svg class="w-6 h-6" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+        <path class="menu-icon-open" stroke-linecap="round" stroke-linejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+        <path class="menu-icon-close hidden" stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12" />
+      </svg>
+    </button>
+  </div>
+
+  <div
+    id="mobile-menu"
+    class="md:hidden hidden bg-navy-soft border-t border-line/20"
+  >
+    <nav aria-label="Móvil" class="flex flex-col px-6 py-4 gap-2">
+      {navLinks.map((link) => (
+        <a
+          href={link.href}
+          class="py-2 text-base font-medium text-paper/90 hover:text-white-warm focus:outline-none focus-visible:ring-2 focus-visible:ring-red rounded transition-colors"
+        >
+          {link.label}
+        </a>
+      ))}
+    </nav>
+  </div>
+</header>
+
+<script is:inline>
+  (function () {
+    const toggle = document.getElementById('menu-toggle');
+    const menu = document.getElementById('mobile-menu');
+    const openIcon = toggle?.querySelector('.menu-icon-open');
+    const closeIcon = toggle?.querySelector('.menu-icon-close');
+    if (!toggle || !menu || !openIcon || !closeIcon) return;
+
+    function setMenuOpen(isOpen) {
+      toggle.setAttribute('aria-expanded', String(isOpen));
+      toggle.setAttribute('aria-label', isOpen ? 'Cerrar menú de navegación' : 'Abrir menú de navegación');
+      menu.classList.toggle('hidden', !isOpen);
+      openIcon.classList.toggle('hidden', isOpen);
+      closeIcon.classList.toggle('hidden', !isOpen);
+    }
+
+    toggle.addEventListener('click', function () {
+      const isOpen = toggle.getAttribute('aria-expanded') === 'true';
+      setMenuOpen(!isOpen);
+    });
+
+    menu.querySelectorAll('a').forEach(function (link) {
+      link.addEventListener('click', function () {
+        setMenuOpen(false);
+      });
+    });
+
+    document.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape' && toggle.getAttribute('aria-expanded') === 'true') {
+        setMenuOpen(false);
+      }
+    });
+  })();
+</script>
