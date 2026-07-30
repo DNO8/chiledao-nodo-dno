@@ -1,0 +1,21 @@
+---
+import GallerySphereClient from './GallerySphereClient';
+---
+
+<section id="galeria" class="bg-navy-soft py-20 md:py-32" aria-labelledby="galeria-heading">
+  <div class="max-w-[var(--container-w)] mx-auto px-6">
+    <div class="mb-12 md:mb-16 text-center">
+      <p class="font-mono text-sm uppercase tracking-widest text-red mb-4">Momentos</p>
+      <h2 id="galeria-heading" class="font-heading text-3xl md:text-4xl lg:text-5xl font-bold tracking-tight text-white-warm">
+        Galería
+      </h2>
+      <p class="text-lg text-paper/80 mt-4 max-w-2xl mx-auto">
+        Imágenes de nuestras actividades, talleres y encuentros con la comunidad Web3 chilena.
+      </p>
+    </div>
+
+    <div class="flex justify-center">
+      <GallerySphereClient client:visible />
+    </div>
+  </div>
+</section>
