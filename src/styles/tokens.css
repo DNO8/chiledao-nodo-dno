@@ -1,0 +1,33 @@
+:root {
+  --ink: #06062d;
+  --navy: #010127;
+  --navy-soft: #09093a;
+  --red: #f31e32;
+  --paper: #efeee8;
+  --white: #f8f6ee;
+  --muted: #62626f;
+  --line: #01012733;
+
+  --font-sans: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI",
+    Roboto, "Helvetica Neue", Arial, sans-serif;
+  --font-heading: "Sora", "Inter", system-ui, -apple-system, sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+
+  --container-w: 1160px;
+}
+
+@theme {
+  --color-ink: var(--ink);
+  --color-navy: var(--navy);
+  --color-navy-soft: var(--navy-soft);
+  --color-red: var(--red);
+  --color-paper: var(--paper);
+  --color-white-warm: var(--white);
+  --color-muted: var(--muted);
+  --color-line: var(--line);
+
+  --font-sans: var(--font-sans);
+  --font-heading: var(--font-heading);
+  --font-mono: var(--font-mono);
+}
