@@ -42,7 +42,7 @@ export default function HeroScrollClient() {
             loop
             muted
             playsInline
-            preload="metadata"
+            preload="none"
             poster="/media/hero/chiledao-hero-poster.avif"
           >
             <source src="/media/hero/chiledao-hero.webm" type="video/webm" />
