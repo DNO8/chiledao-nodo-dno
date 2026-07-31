@@ -1,16 +1,17 @@
 import { useEffect, useRef, useState } from 'react';
 import { motion, useReducedMotion, useScroll, useTransform, useMotionValueEvent } from 'motion/react';
 import { journey } from '../../data';
+import type { OptimizedImage } from '../../lib/optimized-images';
 
 const SLIDE_COUNT = journey.length;
 
-function JourneyPicture({ base, alt }: { base: string; alt: string }) {
+function JourneyPicture({ image, alt }: { image: OptimizedImage; alt: string }) {
   return (
     <picture className="contents">
-      <source srcSet={`/media/images/journey/${base}.avif`} type="image/avif" />
-      <source srcSet={`/media/images/journey/${base}.webp`} type="image/webp" />
+      <source srcSet={image.avif} type="image/avif" />
+      <source srcSet={image.webp} type="image/webp" />
       <img
-        src={`/media/images/journey/${base}.jpg`}
+        src={image.jpg}
         alt={alt}
         className="absolute inset-0 h-full w-full object-cover"
         loading="lazy"
@@ -20,7 +21,7 @@ function JourneyPicture({ base, alt }: { base: string; alt: string }) {
   );
 }
 
-export default function JourneyClient() {
+export default function JourneyClient({ images }: { images: Record<string, OptimizedImage> }) {
   const containerRef = useRef<HTMLDivElement>(null);
   const prefersReducedMotion = useReducedMotion();
   const [activeIndex, setActiveIndex] = useState(0);
@@ -63,7 +64,7 @@ export default function JourneyClient() {
               <article key={slide.region} className="grid md:grid-cols-2 gap-8 items-center">
                 <div className="relative aspect-[16/10] overflow-hidden rounded-lg">
                   <div className="absolute inset-0 bg-navy/40 mix-blend-multiply z-10" />
-                  <JourneyPicture base={slide.image} alt={slide.region} />
+                  <JourneyPicture image={images[slide.image]} alt={slide.region} />
                 </div>
                 <div>
                   <span className="font-mono text-red font-bold text-sm">{String(index + 1).padStart(2, '0')}</span>
@@ -105,7 +106,7 @@ export default function JourneyClient() {
                 <div
                   className={`absolute inset-0 z-10 ${isTonedSoft ? 'bg-navy/30 mix-blend-multiply' : 'bg-navy/55 mix-blend-multiply'}`}
                 />
-                <JourneyPicture base={slide.image} alt={slide.region} />
+                <JourneyPicture image={images[slide.image]} alt={slide.region} />
               </div>
             );
           })}

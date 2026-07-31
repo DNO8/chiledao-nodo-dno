@@ -1,5 +1,10 @@
 ---
 import GallerySphereClient from './GallerySphereClient';
+import { galeria } from '../../data';
+import { getGalleryImages } from '../../lib/optimized-images';
+
+// Keep the existing 20-photo cap; the sphere renders a subset of the gallery.
+const images = await getGalleryImages(galeria.slice(0, 20));
 ---
 
 <section id="galeria" class="bg-navy-soft py-20 md:py-32" aria-labelledby="galeria-heading">
@@ -15,7 +20,7 @@ import GallerySphereClient from './GallerySphereClient';
     </div>
 
     <div class="flex justify-center">
-      <GallerySphereClient client:visible />
+      <GallerySphereClient client:visible images={images} />
     </div>
   </div>
 </section>

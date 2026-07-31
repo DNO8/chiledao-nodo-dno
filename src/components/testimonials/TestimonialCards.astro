@@ -1,11 +1,17 @@
 ---
 import { testimonios } from '../../data';
+import { getTestimonialPoster, type OptimizedImage } from '../../lib/optimized-images';
+
+const posters: Record<string, OptimizedImage> = {};
+for (const t of testimonios) {
+  posters[t.id] = await getTestimonialPoster(t.id);
+}
 ---
 
 <div class="grid grid-cols-1 md:grid-cols-3 gap-6 md:gap-8">
   {testimonios.map((t) => {
     const videoName = t.hasShort ? `${t.id}-short` : t.id;
-    const posterAvif = `/media/videos/${t.id}-poster.avif`;
+    const posterAvif = posters[t.id].avif;
     const webm = `/media/videos/${videoName}.webm`;
     const mp4 = `/media/videos/${videoName}.mp4`;
 

@@ -1,14 +1,10 @@
 "use client"
 
 import * as React from "react"
-import SphereImageGrid, { type ImageData } from "../sphere-image-grid"
-import { galeria } from "../../data"
+import SphereImageGrid from "../sphere-image-grid"
+import type { GalleryImage } from "../../lib/optimized-images"
 
-function formatAlt(name: string) {
-  return `ChileDAO - ${name}`
-}
-
-export default function GallerySphereClient() {
+export default function GallerySphereClient({ images }: { images: GalleryImage[] }) {
   const [containerSize, setContainerSize] = React.useState(300)
 
   React.useEffect(() => {
@@ -21,16 +17,6 @@ export default function GallerySphereClient() {
     mq.addEventListener("change", update)
     return () => mq.removeEventListener("change", update)
   }, [])
-
-  const images: ImageData[] = React.useMemo(
-    () =>
-      galeria.slice(0, 20).map((name) => ({
-        id: name,
-        src: `/media/images/galeria/${name}`,
-        alt: formatAlt(name),
-      })),
-    []
-  )
 
   return (
     <SphereImageGrid

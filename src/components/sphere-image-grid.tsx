@@ -23,7 +23,9 @@ export interface WorldPosition extends Position3D {
 
 export interface ImageData {
   id: string;
-  src: string;
+  avif: string;
+  webp: string;
+  jpg: string;
   alt: string;
   title?: string;
   description?: string;
@@ -80,10 +82,10 @@ const StaticGridFallback: React.FC<{ images: ImageData[] }> = ({ images }) => {
     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
       {images.map((image) => (
         <picture key={image.id} className="block aspect-square overflow-hidden rounded-lg">
-          <source srcSet={`${image.src}.avif`} type="image/avif" />
-          <source srcSet={`${image.src}.webp`} type="image/webp" />
+          <source srcSet={image.avif} type="image/avif" />
+          <source srcSet={image.webp} type="image/webp" />
           <img
-            src={`${image.src}.jpg`}
+            src={image.jpg}
             alt={image.alt}
             className="h-full w-full object-cover"
             loading="lazy"
@@ -348,10 +350,10 @@ const SphereImageGrid: React.FC<SphereImageGridProps> = ({
       >
         <div className="relative w-full h-full rounded-lg overflow-hidden shadow-lg border-2 border-white/20">
           <picture>
-            <source srcSet={`${image.src}.avif`} type="image/avif" />
-            <source srcSet={`${image.src}.webp`} type="image/webp" />
+            <source srcSet={image.avif} type="image/avif" />
+            <source srcSet={image.webp} type="image/webp" />
             <img
-              src={`${image.src}.jpg`}
+              src={image.jpg}
               alt={image.alt}
               className="w-full h-full object-cover"
               draggable={false}
@@ -370,9 +372,9 @@ const SphereImageGrid: React.FC<SphereImageGridProps> = ({
         <div className="bg-white rounded-xl max-w-md w-full overflow-hidden" onClick={(e) => e.stopPropagation()} style={{ animation: 'scaleIn 0.3s ease-out' }}>
           <div className="relative aspect-square">
             <picture>
-              <source srcSet={`${selectedImage.src}.avif`} type="image/avif" />
-              <source srcSet={`${selectedImage.src}.webp`} type="image/webp" />
-              <img src={`${selectedImage.src}.jpg`} alt={selectedImage.alt} className="w-full h-full object-cover" />
+              <source srcSet={selectedImage.avif} type="image/avif" />
+              <source srcSet={selectedImage.webp} type="image/webp" />
+              <img src={selectedImage.jpg} alt={selectedImage.alt} className="w-full h-full object-cover" />
             </picture>
             <button onClick={() => setSelectedImage(null)} className="absolute top-2 right-2 w-8 h-8 bg-black bg-opacity-50 rounded-full text-white flex items-center justify-center hover:bg-opacity-70 transition-all cursor-pointer">
               <X size={16} />

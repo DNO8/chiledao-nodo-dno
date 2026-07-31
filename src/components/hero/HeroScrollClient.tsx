@@ -8,8 +8,9 @@ import {
   ContainerAnimated,
 } from "../animated-gallery"
 import { site } from "../../data/site"
+import type { OptimizedImage } from "../../lib/optimized-images"
 
-export default function HeroScrollClient() {
+export default function HeroScrollClient({ poster }: { poster: OptimizedImage }) {
   const [isDesktop, setIsDesktop] = React.useState(false)
   const [reducedMotion, setReducedMotion] = React.useState(false)
   const [mounted, setMounted] = React.useState(false)
@@ -43,17 +44,19 @@ export default function HeroScrollClient() {
             muted
             playsInline
             preload="none"
-            poster="/media/hero/chiledao-hero-poster.avif"
+            poster={poster.avif}
           >
             <source src="/media/hero/chiledao-hero.webm" type="video/webm" />
             <source src="/media/hero/chiledao-hero.mp4" type="video/mp4" />
           </video>
         ) : (
           <picture className="absolute inset-0 w-full h-full">
-            <source srcSet="/media/hero/chiledao-hero-poster.avif" type="image/avif" />
+            <source srcSet={poster.avif} type="image/avif" />
             <img
-              src="/media/hero/chiledao-hero-poster.jpg"
+              src={poster.jpg}
               alt="ChileDAO"
+              width={poster.width}
+              height={poster.height}
               className="w-full h-full object-cover"
             />
           </picture>

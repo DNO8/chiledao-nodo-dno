@@ -1,7 +1,10 @@
 ---
 import HeroScrollClient from './HeroScrollClient';
+import { getHeroPoster } from '../../lib/optimized-images';
+
+const poster = await getHeroPoster();
 ---
 
 <section id="inicio" class="relative bg-navy" aria-label="Portada">
-  <HeroScrollClient client:load />
+  <HeroScrollClient client:load poster={poster} />
 </section>
