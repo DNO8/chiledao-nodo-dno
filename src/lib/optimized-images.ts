@@ -4,10 +4,11 @@ import type { ImageMetadata } from 'astro';
 /**
  * Build-time image optimization for media assets.
  *
- * The .jpg files under src/assets/images are the masters; AVIF/WebP variants
- * are derived here via astro:assets (the pre-existing .avif/.webp files are
- * kept on disk but are not used as sources). Everything returned is plain
- * serializable data so React islands only need type imports from this module.
+ * Masters: most domains keep .jpg masters under src/assets/images; trayectoria
+ * masters are user-exported .webp files. AVIF/WebP/JPEG variants are derived
+ * here via astro:assets (pre-existing sibling .avif/.webp files are kept on
+ * disk but are not used as sources). Everything returned is plain serializable
+ * data so React islands only need type imports from this module.
  */
 export interface OptimizedImage {
   /** AVIF variant URL (hashed, emitted at build time). */
@@ -33,6 +34,10 @@ const galleryMasters = import.meta.glob<{ default: ImageMetadata }>(
 );
 const journeyMasters = import.meta.glob<{ default: ImageMetadata }>(
   '../assets/images/journey/*.jpg',
+  { eager: true },
+);
+const trayectoriaMasters = import.meta.glob<{ default: ImageMetadata }>(
+  '../assets/images/trayectoria/*.webp',
   { eager: true },
 );
 const testimonialMasters = import.meta.glob<{ default: ImageMetadata }>(
@@ -63,10 +68,11 @@ function masterFor(
   masters: Record<string, { default: ImageMetadata }>,
   dir: string,
   name: string,
+  ext: string = 'jpg',
 ): ImageMetadata {
-  const master = masters[`../assets/images/${dir}/${name}.jpg`]?.default;
+  const master = masters[`../assets/images/${dir}/${name}.${ext}`]?.default;
   if (!master) {
-    throw new Error(`[optimized-images] Missing master: src/assets/images/${dir}/${name}.jpg`);
+    throw new Error(`[optimized-images] Missing master: src/assets/images/${dir}/${name}.${ext}`);
   }
   return master;
 }
@@ -89,6 +95,21 @@ export async function getJourneyImages(
   const entries = await Promise.all(
     names.map(
       async (name) => [name, await optimize(masterFor(journeyMasters, 'journey', name))] as const,
+    ),
+  );
+  return Object.fromEntries(entries);
+}
+
+/** Optimized trayectoria photos keyed by base name (matches each milestone's `images` entries). */
+export async function getTrayectoriaImages(
+  names: readonly string[],
+): Promise<Record<string, OptimizedImage>> {
+  const entries = await Promise.all(
+    names.map(
+      async (name) => [
+        name,
+        await optimize(masterFor(trayectoriaMasters, 'trayectoria', name, 'webp')),
+      ] as const,
     ),
   );
   return Object.fromEntries(entries);
