@@ -23,7 +23,9 @@ export interface WorldPosition extends Position3D {
 
 export interface ImageData {
   id: string;
-  src: string;
+  avif: string;
+  webp: string;
+  jpg: string;
   alt: string;
   title?: string;
   description?: string;
@@ -75,21 +77,31 @@ const seededRandom = (i: number): number => {
   return ((i * 2654435761) % 1000) / 1000;
 };
 
-const StaticGridFallback: React.FC<{ images: ImageData[] }> = ({ images }) => {
+const StaticGridFallback: React.FC<{
+  images: ImageData[];
+  onSelect?: (image: ImageData) => void;
+}> = ({ images, onSelect }) => {
   return (
     <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
       {images.map((image) => (
-        <picture key={image.id} className="block aspect-square overflow-hidden rounded-lg">
-          <source srcSet={`${image.src}.avif`} type="image/avif" />
-          <source srcSet={`${image.src}.webp`} type="image/webp" />
-          <img
-            src={`${image.src}.jpg`}
-            alt={image.alt}
-            className="h-full w-full object-cover"
-            loading="lazy"
-            decoding="async"
-          />
-        </picture>
+        <button
+          key={image.id}
+          type="button"
+          onClick={() => onSelect?.(image)}
+          className="block aspect-square w-full cursor-pointer overflow-hidden rounded-lg p-0 ring-1 ring-white/10 shadow-lg shadow-navy/60 transition-transform duration-200 hover:-translate-y-0.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red"
+        >
+          <picture className="block h-full w-full">
+            <source srcSet={image.avif} type="image/avif" />
+            <source srcSet={image.webp} type="image/webp" />
+            <img
+              src={image.jpg}
+              alt={image.alt}
+              className="h-full w-full object-cover"
+              loading="lazy"
+              decoding="async"
+            />
+          </picture>
+        </button>
       ))}
     </div>
   );
@@ -348,10 +360,10 @@ const SphereImageGrid: React.FC<SphereImageGridProps> = ({
       >
         <div className="relative w-full h-full rounded-lg overflow-hidden shadow-lg border-2 border-white/20">
           <picture>
-            <source srcSet={`${image.src}.avif`} type="image/avif" />
-            <source srcSet={`${image.src}.webp`} type="image/webp" />
+            <source srcSet={image.avif} type="image/avif" />
+            <source srcSet={image.webp} type="image/webp" />
             <img
-              src={`${image.src}.jpg`}
+              src={image.jpg}
               alt={image.alt}
               className="w-full h-full object-cover"
               draggable={false}
@@ -367,12 +379,12 @@ const SphereImageGrid: React.FC<SphereImageGridProps> = ({
     if (!selectedImage) return null;
     return (
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/30" onClick={() => setSelectedImage(null)} style={{ animation: 'fadeIn 0.3s ease-out' }}>
-        <div className="bg-white rounded-xl max-w-md w-full overflow-hidden" onClick={(e) => e.stopPropagation()} style={{ animation: 'scaleIn 0.3s ease-out' }}>
+        <div className="bg-navy rounded-xl max-w-md w-full overflow-hidden ring-1 ring-white/10" onClick={(e) => e.stopPropagation()} style={{ animation: 'scaleIn 0.3s ease-out' }}>
           <div className="relative aspect-square">
             <picture>
-              <source srcSet={`${selectedImage.src}.avif`} type="image/avif" />
-              <source srcSet={`${selectedImage.src}.webp`} type="image/webp" />
-              <img src={`${selectedImage.src}.jpg`} alt={selectedImage.alt} className="w-full h-full object-cover" />
+              <source srcSet={selectedImage.avif} type="image/avif" />
+              <source srcSet={selectedImage.webp} type="image/webp" />
+              <img src={selectedImage.jpg} alt={selectedImage.alt} className="w-full h-full object-cover" />
             </picture>
             <button onClick={() => setSelectedImage(null)} className="absolute top-2 right-2 w-8 h-8 bg-black bg-opacity-50 rounded-full text-white flex items-center justify-center hover:bg-opacity-70 transition-all cursor-pointer">
               <X size={16} />
@@ -380,8 +392,8 @@ const SphereImageGrid: React.FC<SphereImageGridProps> = ({
           </div>
           {(selectedImage.title || selectedImage.description) && (
             <div className="p-6">
-              {selectedImage.title && <h3 className="text-xl font-bold mb-2">{selectedImage.title}</h3>}
-              {selectedImage.description && <p className="text-gray-600">{selectedImage.description}</p>}
+              {selectedImage.title && <h3 className="text-xl font-bold mb-2 text-white-warm">{selectedImage.title}</h3>}
+              {selectedImage.description && <p className="text-paper/70">{selectedImage.description}</p>}
             </div>
           )}
         </div>
@@ -390,14 +402,20 @@ const SphereImageGrid: React.FC<SphereImageGridProps> = ({
   };
 
   if (!isMounted) {
-    return <div className="bg-gray-100 rounded-lg animate-pulse flex items-center justify-center" style={{ width: containerSize, height: containerSize }}><div className="text-gray-400">Loading...</div></div>;
+    return <StaticGridFallback images={images} onSelect={setSelectedImage} />;
   }
   if (!limitedImages.length) {
-    return <div className="bg-gray-50 rounded-lg border-2 border-dashed border-gray-300 flex items-center justify-center" style={{ width: containerSize, height: containerSize }}><div className="text-gray-400 text-center"><p>No images provided</p><p className="text-sm">Add images to the images prop</p></div></div>;
+    return <div className="bg-navy rounded-lg border-2 border-dashed border-red/50 flex items-center justify-center" style={{ width: containerSize, height: containerSize }}><div className="text-paper/60 text-center"><p>No images provided</p><p className="text-sm text-paper/40">Add images to the images prop</p></div></div>;
   }
 
   if (reducedMotion) {
-    return <StaticGridFallback images={limitedImages} />;
+    return (
+      <>
+        <style>{`@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } } @keyframes scaleIn { from { transform: scale(0.8); opacity: 0; } to { transform: scale(1); opacity: 1; } }`}</style>
+        <StaticGridFallback images={images} onSelect={setSelectedImage} />
+        {renderSpotlightModal()}
+      </>
+    );
   }
 
   return (

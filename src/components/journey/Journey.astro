@@ -1,7 +1,11 @@
 ---
 import JourneyClient from './JourneyClient';
+import { journey } from '../../data';
+import { getJourneyImages } from '../../lib/optimized-images';
+
+const images = await getJourneyImages(journey.map((slide) => slide.image));
 ---
 
 <section id="recorrido" aria-labelledby="recorrido-heading">
-  <JourneyClient client:visible />
+  <JourneyClient client:visible images={images} />
 </section>

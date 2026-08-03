@@ -1,7 +1,11 @@
 ---
 import TrayectoriaClient from './TrayectoriaClient';
+import { trayectoria } from '../../data';
+import { getTrayectoriaImages } from '../../lib/optimized-images';
+
+const images = await getTrayectoriaImages(trayectoria.flatMap((item) => item.images));
 ---
 
 <section id="trayectoria" class="bg-navy-soft" aria-labelledby="trayectoria-heading">
-  <TrayectoriaClient client:visible />
+  <TrayectoriaClient client:visible images={images} />
 </section>
