@@ -8,17 +8,17 @@ export interface Site {
 }
 
 export const site: Site = {
-  orgName: "ChileDAO",
+  orgName: "Chile DAO",
   legalStatus: "PRECOOPERATIVA",
   statusDescription:
     "Comunidad tecnológica en proceso de conformación cooperativa, sin fines de lucro y de participación abierta.",
   tagline:
-    "ChileDAO educa, incuba y articula comunidad para conectar el talento chileno con la Web3.",
+    "Educación en Blockchain e Inteligencia Artificial para comprender, aprender y conectar con la comunidad tecnológica en Chile.",
   contactEmail: "contacto@chiledao.cl",
   externalUrls: [
     { label: "Email", url: "mailto:contacto@chiledao.cl" },
     { label: "Linktree", url: "https://linktr.ee/web3chile" },
-    { label: "Discord landing", url: "discord.gg/8Axk28NzWB" },
+    { label: "Discord landing", url: "https://discord.gg/8Axk28NzWB" },
     { label: "Discord participa", url: "https://discord.gg/sUpWey4U" },
     {
       label: "WhatsApp group",

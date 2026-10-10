@@ -26,6 +26,9 @@
   --color-white-warm: var(--white);
   --color-muted: var(--muted);
   --color-line: var(--line);
+  --color-background: var(--navy);
+  --color-foreground: var(--white);
+  --color-muted-foreground: var(--paper);
 
   --font-sans: var(--font-sans);
   --font-heading: var(--font-heading);

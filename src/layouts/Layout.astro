@@ -1,6 +1,14 @@
 ---
 import '../styles/global.css';
 import { site } from '../data';
+import sora700 from '@fontsource/sora/files/sora-latin-700-normal.woff2?url';
+import inter400 from '@fontsource/inter/files/inter-latin-400-normal.woff2?url';
+import inter500 from '@fontsource/inter/files/inter-latin-500-normal.woff2?url';
+import inter600 from '@fontsource/inter/files/inter-latin-600-normal.woff2?url';
+import geist400 from '@fontsource/geist-mono/files/geist-mono-latin-400-normal.woff2?url';
+
+// Reuse the current CSS faces, not a second font registration or public path.
+const aboveFoldFonts = [sora700, inter400, inter500, inter600, geist400];
 
 interface Props {
   title?: string;
@@ -8,7 +16,7 @@ interface Props {
 }
 
 const {
-  title = 'ChileDAO Nodo DNO',
+  title = site.orgName,
   description = site.tagline,
 } = Astro.props;
 const ogTitle = title;
@@ -16,12 +24,16 @@ const ogDescription = description;
 ---
 
 <!doctype html>
-<html lang="es">
+<html lang="es" style="scrollbar-gutter: stable;">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="description" content={description} />
     <meta name="generator" content={Astro.generator} />
+
+    {aboveFoldFonts.map(href => (
+      <link rel="preload" href={href} as="font" type="font/woff2" crossorigin="anonymous" />
+    ))}
 
     <meta property="og:title" content={ogTitle} />
     <meta property="og:description" content={ogDescription} />

@@ -20,6 +20,7 @@
     "@tailwindcss/vite": "^4.0.0",
     "astro": "^7.1.6",
     "clsx": "^2.1.1",
+    "gsap": "^3.13.0",
     "lucide-react": "^1.28.0",
     "motion": "^12.43.0",
     "react": "^19.0.0",

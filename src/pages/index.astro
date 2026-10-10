@@ -3,38 +3,44 @@ import Layout from '../layouts/Layout.astro';
 import Header from '../components/Header.astro';
 import Footer from '../components/Footer.astro';
 import HeroScroll from '../components/hero/HeroScroll.astro';
-import About from '../components/sections/About.astro';
+import ParticleWaveBackground from '../components/hero/ParticleWaveBackground.astro';
+import TimelineSection from '../components/trayectoria/TimelineSection.astro';
 import Pilares from '../components/sections/Pilares.astro';
-import Objetivos from '../components/sections/Objetivos.astro';
-import Desafios from '../components/sections/Desafios.astro';
 import Servicios from '../components/sections/Servicios.astro';
-import TrayectoriaHorizontal from '../components/trayectoria/TrayectoriaHorizontal.astro';
-import Journey from '../components/journey/Journey.astro';
-import Alianzas from '../components/sections/Alianzas.astro';
-import Equipo from '../components/sections/Equipo.astro';
-import GallerySphere from '../components/gallery/GallerySphere.astro';
-import Testimonials from '../components/testimonials/Testimonials.astro';
 import Faq from '../components/sections/Faq.astro';
 import Contacto from '../components/sections/Contacto.astro';
 ---
 
-<Layout title="ChileDAO Nodo DNO">
-  <Header />
-  <main id="main-content">
-    <HeroScroll />
-    <About />
-    <Pilares />
-    <Objetivos />
-    <Desafios />
-    <Servicios />
-    <TrayectoriaHorizontal />
-    <Journey />
-    <Alianzas />
-    <Equipo />
-    <GallerySphere />
-    <Testimonials />
-    <Faq />
-    <Contacto />
-  </main>
-  <Footer />
+<Layout>
+  <div data-landing>
+    <ParticleWaveBackground />
+    <Header />
+    <main id="main-content">
+      <HeroScroll />
+      <TimelineSection />
+      <Pilares />
+      <Servicios />
+      <Faq />
+      <Contacto />
+    </main>
+    <Footer />
+  </div>
 </Layout>
+
+<style>
+  /* Section paints stay beneath the transparent wave; only real content rises. */
+  [data-landing] { isolation: isolate; }
+  [data-landing] :global([data-particle-wave-owner]) { z-index: 1; }
+  [data-landing] :global([data-works-showcase]),
+  [data-landing] :global(#pilares > div),
+  [data-landing] :global(#formacion > div),
+  [data-landing] :global(#faq > div),
+  [data-landing] :global(#contacto > div),
+  [data-landing] :global(footer > div) { position: relative; z-index: 2; }
+  [data-landing] :global([data-timeline-canvas]) { z-index: 2; }
+  [data-landing] :global([data-timeline]:not([data-enhanced]) [data-timeline-canvas]) { position: relative; }
+  /* Native vertical flow needs a stacking layer, never a sticky override. */
+  @media (max-width: 1023px) {
+    [data-landing] :global([data-timeline-canvas]) { position: relative; }
+  }
+</style>

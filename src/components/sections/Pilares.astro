@@ -2,23 +2,38 @@
 import { pilares } from '../../data';
 ---
 
-<section id="pilares" class="bg-navy-soft py-20 md:py-32" aria-labelledby="pilares-heading">
+<section id="pilares" class="bg-navy-soft py-16 md:py-24" aria-labelledby="pilares-heading">
   <div class="max-w-[var(--container-w)] mx-auto px-6">
-    <div class="mb-12 md:mb-16">
-      <p class="font-mono text-sm uppercase tracking-widest text-red mb-4">Nuestros pilares</p>
+    <div class="mb-10 max-w-3xl">
+      <p class="font-mono text-sm uppercase tracking-widest text-red mb-4">Dos focos de aprendizaje</p>
       <h2 id="pilares-heading" class="font-heading text-3xl md:text-4xl lg:text-5xl font-bold tracking-tight text-white-warm">
-        Educación, incubación y comunidad
+        Entender primero. Aplicar con criterio.
       </h2>
     </div>
 
-    <div class="grid grid-cols-1 md:grid-cols-3 gap-6 lg:gap-8">
+    <div class="grid grid-cols-1 md:grid-cols-2 gap-6 lg:gap-8">
       {pilares.map((pilar) => (
-        <article class="bg-navy/50 border border-line/20 rounded-lg p-6 md:p-8">
-          <p class="font-mono text-sm uppercase tracking-widest text-red mb-4">{pilar.code}</p>
-          <h3 class="font-heading text-xl md:text-2xl font-semibold tracking-tight text-white-warm mb-3">
+        <article id={pilar.id} aria-labelledby={`${pilar.id}-heading`} class="scroll-mt-24 bg-navy border border-paper/15 border-t-red rounded-2xl p-6 md:p-8 flex flex-col">
+          <div class="flex items-center justify-between gap-4 mb-5">
+            <p class="font-mono text-xs uppercase tracking-widest text-paper/80">{pilar.code}</p>
+            <div class="flex items-center gap-1.5 text-red" aria-hidden="true">
+              <span class="w-2 h-2 rounded-full border border-current"></span>
+              <span class="w-6 h-px bg-current"></span>
+              <span class="w-2 h-2 rounded-full border border-current"></span>
+              <span class="w-6 h-px bg-current"></span>
+              <span class="w-2 h-2 rounded-full border border-current"></span>
+            </div>
+          </div>
+          <h3 id={`${pilar.id}-heading`} class="font-heading text-2xl md:text-3xl font-semibold tracking-tight text-white-warm mb-3">
             {pilar.title}
           </h3>
           <p class="text-paper/80 leading-relaxed">{pilar.description}</p>
+          <ul class="mt-6 mb-8 space-y-3 text-paper/90 list-disc pl-5">
+            {pilar.topics.map((topic) => <li>{topic}</li>)}
+          </ul>
+          <a href="#contacto" class="mt-auto self-start text-paper font-semibold underline underline-offset-4 decoration-red hover:text-white-warm focus:outline-none focus-visible:ring-2 focus-visible:ring-red rounded">
+            Consultar sobre {pilar.title}
+          </a>
         </article>
       ))}
     </div>

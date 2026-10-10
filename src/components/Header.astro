@@ -2,22 +2,18 @@
 import { site } from '../data';
 
 const navLinks = [
-  { href: '#about', label: 'Sobre nosotros' },
-  { href: '#pilares', label: 'Pilares' },
-  { href: '#objetivos', label: 'Objetivos' },
-  { href: '#servicios', label: 'Servicios' },
-  { href: '#trayectoria', label: 'Trayectoria' },
-  { href: '#alianzas', label: 'Alianzas' },
-  { href: '#equipo', label: 'Equipo' },
-  { href: '#faq', label: 'FAQ' },
+  { href: '#blockchain', label: 'Blockchain' },
+  { href: '#ia', label: 'IA' },
+  { href: '#formacion', label: 'Formación' },
   { href: '#contacto', label: 'Contacto' },
 ];
 ---
 
-<header class="sticky top-0 z-40 bg-navy text-paper transition-all duration-200">
+<header class="sticky top-0 z-40 bg-navy text-paper border-b border-paper/10">
   <div class="max-w-[var(--container-w)] mx-auto px-6 flex items-center justify-between h-16 md:h-20">
-    <a href="/" class="font-heading font-bold text-xl md:text-2xl tracking-tight focus:outline-none focus-visible:ring-2 focus-visible:ring-red rounded px-1 -ml-1">
-      {site.orgName} <span class="text-red">Nodo DNO</span>
+    <a href="/" aria-label={site.orgName} class="font-heading font-bold text-2xl md:text-3xl tracking-tight text-white-warm focus:outline-none focus-visible:ring-2 focus-visible:ring-red rounded px-1 -ml-1">
+      <img src="/images/brand/chile-dao-light.svg" width="1000" height="606" alt={site.orgName} class="w-[90px] md:w-[108px] h-auto" />
+      <span class="sr-only">{site.orgName}</span>
     </a>
 
     <nav aria-label="Principal" class="hidden md:flex items-center gap-1">

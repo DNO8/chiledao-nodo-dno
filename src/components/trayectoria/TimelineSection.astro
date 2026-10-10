@@ -1,0 +1,10 @@
+---
+import Timeline from '../ui/timeline';
+import { getTimelineItems } from '../../lib/timeline-images';
+
+const items = await getTimelineItems();
+---
+
+<section id="trayectoria" class="bg-navy scroll-mt-24" aria-labelledby="trayectoria-heading">
+  <Timeline items={items} client:load />
+</section>

@@ -1,26 +1,34 @@
 export interface Pilar {
+  id: string;
   code: string;
   title: string;
   description: string;
+  topics: string[];
 }
 
 export const pilares: Pilar[] = [
   {
-    code: "0x_EDU",
-    title: "Educación",
+    id: "blockchain",
+    code: "01 · Blockchain",
+    title: "Blockchain",
     description:
-      "Capacitamos a personas e instituciones para que entiendan y naveguen el ecosistema Web3 con un enfoque inclusivo y aplicado.",
+      "Comprende cómo funcionan las redes descentralizadas y qué posibilidades abren para personas y organizaciones.",
+    topics: [
+      "Fundamentos de blockchain y Web3",
+      "Contratos inteligentes y sus aplicaciones",
+      "Protocolos y ecosistema: Avalanche, Stellar y Polkadot",
+    ],
   },
   {
-    code: "0x_INC",
-    title: "Incubación",
+    id: "ia",
+    code: "02 · Inteligencia Artificial",
+    title: "Inteligencia Artificial",
     description:
-      "Acompañamos proyectos emergentes con mentoría, recursos y una comunidad dispuesta a ayudarlos a crecer.",
-  },
-  {
-    code: "0x_COM",
-    title: "Comunidad",
-    description:
-      "Fomentamos alianzas sólidas entre instituciones, educadores y emprendedores para catalizar la innovación en Chile.",
+      "Explora la inteligencia artificial desde una mirada educativa: comprender sus capacidades es tan importante como reconocer sus límites.",
+    topics: [
+      "Fundamentos de inteligencia artificial",
+      "Usos útiles en el trabajo y el aprendizaje",
+      "Pensamiento crítico: límites y evaluación de resultados",
+    ],
   },
 ];

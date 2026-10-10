@@ -1,10 +1,148 @@
 ---
-import HeroScrollClient from './HeroScrollClient';
-import { getHeroPoster } from '../../lib/optimized-images';
+import WorksWheelShowcase from './WorksWheelShowcase';
+import { getWorksWithImages } from '../../lib/works-images';
 
-const poster = await getHeroPoster();
+const works = await getWorksWithImages();
 ---
 
-<section id="inicio" class="relative bg-navy" aria-label="Portada">
-  <HeroScrollClient client:load poster={poster} />
+<section id="inicio" class="relative bg-navy" aria-labelledby="inicio-heading">
+  <div class="hero-backdrop pointer-events-none absolute inset-0" aria-hidden="true"></div>
+  <WorksWheelShowcase items={works} client:load />
+  <script is:inline>
+    // Run during parsing, before deferred island/GSAP imports or image paint.
+    // SSR has no hidden styles: blocking this script leaves native links visible.
+    (() => {
+      const owner = document.currentScript?.parentElement;
+      if (!owner) return;
+      const photos = [...owner.querySelectorAll('[data-hero-photo]')];
+      const motion = matchMedia('(prefers-reduced-motion: reduce)');
+      const viewport = { width: innerWidth, height: innerHeight };
+      const animations = new Map();
+      const removers = new Set();
+      let stopped = false;
+      const visible = photo => {
+        photo.style.removeProperty('opacity');
+        animations.get(photo)?.cancel();
+        animations.delete(photo);
+        photo.dataset.photoReady = 'complete';
+      };
+      const finish = () => {
+        stopped = true;
+        photos.forEach(visible);
+        removers.forEach(remove => remove());
+        removers.clear();
+      };
+      const listen = (target, event, handler, options) => {
+        target.addEventListener(event, handler, options);
+        removers.add(() => target.removeEventListener(event, handler, options));
+      };
+      try {
+        if (motion.matches || !Element.prototype.animate) { finish(); return; }
+        // Sample power2.out (1-(1-t)^3) into native opacity-only keyframes.
+        // The browser owns playback; no polling or idle RAF is needed.
+        const frames = Array.from({ length: 81 }, (_, index) => ({
+          offset: index / 80, opacity: 1 - (1 - index / 80) ** 3,
+        }));
+        photos.forEach(photo => {
+          const image = photo.querySelector('img');
+          if (!image) return;
+          photo.style.opacity = '0';
+          photo.dataset.photoReady = 'pending';
+          let started = false;
+          const ready = async () => {
+            if (started || stopped) return;
+            started = true;
+            try {
+              await image.decode();
+              if (stopped || !photo.isConnected) return;
+              if (motion.matches || !image.naturalWidth) { visible(photo); return; }
+              const animation = photo.animate(frames, { duration: 800, fill: 'both' });
+              animations.set(photo, animation);
+              photo.dataset.photoReady = 'fading';
+              animation.onfinish = () => {
+                visible(photo);
+                if (photos.every(node => node.dataset.photoReady === 'complete')) finish();
+              };
+            } catch {
+              // Broken/unsupported media keeps its alt and original native link.
+              if (!stopped && photo.isConnected) visible(photo);
+            }
+          };
+          listen(image, 'load', ready, { once: true });
+          listen(image, 'error', () => visible(photo), { once: true });
+          if (image.complete) void ready();
+        });
+        ['pointerdown', 'keydown', 'wheel'].forEach(event =>
+          listen(owner, event, finish, { capture: true, passive: true }));
+        listen(window, 'scroll', finish, { passive: true });
+        listen(window, 'resize', () => {
+          // Initial parsing can deliver resize without changing this viewport.
+          // Only a genuine resize interrupts the independent photo entrance.
+          if (innerWidth !== viewport.width || innerHeight !== viewport.height) finish();
+        }, { passive: true });
+        listen(window, 'pagehide', finish, { once: true });
+        listen(motion, 'change', () => { if (motion.matches) finish(); });
+      } catch {
+        finish();
+      }
+    })();
+  </script>
 </section>
+
+<style>
+  #inicio { --hero-height: calc(100svh - 65px); }
+  /* The section retains the navy paint; only the inner shell reveals its backdrop. */
+  #inicio :global([data-works-wheel]) { background-color:transparent; }
+  @media (min-width: 768px) { #inicio { --hero-height: calc(100svh - 81px); } }
+  /* The same shell is painted by SSR and enhanced in place. Container units
+     mirror the initial measured superellipse; GSAP owns only its inner layers. */
+  #inicio :global(.works-viewport) { min-height:560px; }
+  #inicio :global([data-works-stage]) { container-type:size; }
+  #inicio :global(.works-ring) {
+    --card-w:min(55.1cqh,34cqw,360px);
+    --card-h:calc(var(--card-w) / 1.45);
+    --intro-w:min(66cqw,36rem);
+    --face-w:min(150px,max(50px,calc((100cqw - var(--intro-w)) / 4)));
+    --ring-x:max(calc(var(--intro-w) / 2 + var(--face-w) / 2 + 12px),calc(50cqw - var(--face-w) * .55 - 12px));
+    --ring-y:max(calc(var(--card-h) * 1.14),calc(50cqh - var(--face-w) * .6 - 12px));
+  }
+  #inicio :global([data-work-card]) {
+    --ring-effective-y:var(--ring-y-factor);
+    width:var(--card-w); height:var(--card-h);
+    margin-left:calc(var(--card-w) / -2); margin-top:calc(var(--card-h) / -2);
+    transform:translate(calc(var(--ring-x-factor) * var(--ring-x)),calc(var(--ring-effective-y) * var(--ring-y))) rotateZ(var(--ring-angle));
+  }
+  #inicio :global([data-work-face]) { transform:scale(calc(var(--face-w) / var(--card-w))); }
+  @media(max-width:599px) {
+    #inicio :global(.works-viewport) { min-height:680px; }
+    #inicio :global(.works-ring) { --card-w:min(55.1cqh,65cqw,360px); --face-w:min(74px,max(50px,calc((100cqw - var(--intro-w)) / 4))); }
+  }
+  @media(max-width:359px) {
+    #inicio :global(.works-viewport) { min-height:600px; }
+    #inicio :global([data-work-card]) { --ring-effective-y:var(--ring-narrow-y-factor); }
+  }
+  /* Never prehide server content. Even a failed client leaves readable copy
+     and artwork; delayed enhancement adopts this entrance rather than replaying. */
+  #inicio :global([data-hero-word]), #inicio :global([data-hero-reveal]) {
+    animation:hero-arrive .75s both;
+    animation-delay:calc(var(--entrance-index,0) * .045s);
+  }
+  #inicio :global([data-hero-word]) { display:inline-block; }
+  /* Photo readiness/playback is owned only by the early inline controller. */
+  #inicio :global([data-hero-entrance="running"] [data-hero-word]),
+  #inicio :global([data-hero-entrance="running"] [data-hero-reveal]),
+  #inicio :global([data-hero-entrance="complete"] [data-hero-word]),
+   #inicio :global([data-hero-entrance="complete"] [data-hero-reveal]) { animation:none; }
+  @keyframes hero-arrive { from { opacity:.75; transform:translateY(8px); } to { opacity:1; transform:none; } }
+  @media(prefers-reduced-motion:reduce) {
+    #inicio :global([data-hero-word]), #inicio :global([data-hero-photo]), #inicio :global([data-hero-reveal]) { animation:none; }
+    #inicio :global([data-hero-photo]) { opacity:1 !important; }
+  }
+  .hero-backdrop {
+    background-image:
+      radial-gradient(ellipse at 90% 40%, rgba(243, 30, 50, 0.12), transparent 60%),
+      linear-gradient(rgba(239, 238, 232, 0.025) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(239, 238, 232, 0.025) 1px, transparent 1px);
+    background-size: auto, 64px 64px, 64px 64px;
+  }
+</style>
