@@ -1,0 +1,15 @@
+# Project-scoped review settings; no hooks or executable commands.
+PROVIDER=opencode
+RULES_FILE=AGENTS.md
+STRICT_MODE=true
+TIMEOUT=300
+
+# GGA v2.10.1 uses suffix matching for patterns beginning with *.
+# Include tests and fixtures, not just application source.
+FILE_PATTERNS='*.astro,*.ts,*.tsx,*.js,*.jsx,*.mjs,*.css,*.json,.gga,AGENTS.md'
+
+# Directory globs must not begin with * under the installed filter.
+# Binary assets and generated dependency/build/cache content are out of scope.
+# pnpm-lock.yaml is intentionally excluded: dependency resolution needs separate validation.
+# Internal task journals and the unused carousel are not delivery inputs.
+EXCLUDE_PATTERNS='*.jpg,*.jpeg,*.png,*.gif,*.webp,*.avif,*.ico,*.woff,*.woff2,*.ttf,*.otf,*.mp4,*.webm,*.pdf,*.zip,node_modules/*,?*/node_modules/*,dist/*,?*/dist/*,.astro/*,?*/.astro/*,.cache/*,?*/.cache/*,.gga-cache/*,?*/.gga-cache/*,coverage/*,?*/coverage/*,pnpm-lock.yaml,odd/tasks/*,src/components/media/PhotoCarousel.astro'
