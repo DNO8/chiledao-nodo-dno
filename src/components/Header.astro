@@ -30,7 +30,7 @@ const navLinks = [
     <button
       id="menu-toggle"
       type="button"
-      class="md:hidden p-2 rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-red"
+      class="hidden md:hidden p-2 rounded focus:outline-none focus-visible:ring-2 focus-visible:ring-red"
       aria-expanded="false"
       aria-controls="mobile-menu"
       aria-label="Abrir menú de navegación"
@@ -44,7 +44,7 @@ const navLinks = [
 
   <div
     id="mobile-menu"
-    class="md:hidden hidden bg-navy-soft border-t border-line/20"
+    class="md:hidden bg-navy-soft border-t border-line/20"
   >
     <nav aria-label="Móvil" class="flex flex-col px-6 py-4 gap-2">
       {navLinks.map((link) => (
@@ -58,6 +58,16 @@ const navLinks = [
     </nav>
   </div>
 </header>
+
+<style>
+  @media (max-width: 767px) {
+    /* The native menu adds four 2.5rem links, three .5rem gaps, 2rem padding
+       and one border pixel. Only the expanded SSR fallback needs extra clearance. */
+    :global(html:has(#menu-toggle.hidden) :is(#blockchain, #ia, #formacion, #contacto)) {
+      scroll-margin-top: calc(6rem + 13.5rem + 1px);
+    }
+  }
+</style>
 
 <script is:inline>
   (function () {
@@ -88,8 +98,15 @@ const navLinks = [
 
     document.addEventListener('keydown', function (e) {
       if (e.key === 'Escape' && toggle.getAttribute('aria-expanded') === 'true') {
+        const restoreFocus = menu.contains(document.activeElement);
         setMenuOpen(false);
+        if (restoreFocus) toggle.focus({ preventScroll: true });
       }
     });
+
+    // Parser-synchronous enhancement collapses the native menu before painting.
+    // Until all handlers are installed, links remain usable and the toggle hidden.
+    setMenuOpen(false);
+    toggle.classList.remove('hidden');
   })();
 </script>

@@ -4,7 +4,9 @@ import PolaroidLineCarousel, { SlideImage, type Slide } from '../ui/polaroid-lin
 export default function FormationPolaroid({ slides }: { slides: Slide[] }) {
   const [mounted, setMounted] = useState(false);
   const id = useId();
-  useEffect(() => setMounted(true), []);
+  useEffect(() => {
+    if (typeof ResizeObserver === 'function' && typeof IntersectionObserver === 'function') setMounted(true);
+  }, []);
   return <div data-formation-polaroid role="region" aria-label="Encuentros de formación" aria-roledescription="carrusel">
     {mounted ? <PolaroidLineCarousel slides={slides} autoplay={0} /> : <>
       <style>{`

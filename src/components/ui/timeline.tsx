@@ -4,7 +4,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from 'react';
-import ImageLightbox, { type LightboxImage } from './image-lightbox';
+import ImageLightbox, { canOpenImageLightbox, type LightboxImage } from './image-lightbox';
 
 export type TimelineMedia = {
   image: string;
@@ -272,9 +272,17 @@ export default function Timeline({ items }: { items: TimelineItem[] }) {
               {item.media && <><a href={item.media.fullSrc} data-timeline-image={item.id}
                 aria-label={`Ampliar imagen: ${item.media.alt}`}
                 onFocus={event => alignFocused.current(event.currentTarget)}
-                onClick={event => { event.preventDefault(); openImage(item, event.currentTarget); }}
+                onClick={event => {
+                  if (event.defaultPrevented || event.button !== 0 || event.ctrlKey || event.metaKey
+                    || event.shiftKey || event.altKey || !canOpenImageLightbox()) return;
+                  event.preventDefault();
+                  openImage(item, event.currentTarget);
+                }}
                 onKeyDown={event => {
-                  if (event.key === ' ') { event.preventDefault(); openImage(item, event.currentTarget); }
+                  if (event.key !== ' ' || event.defaultPrevented || event.ctrlKey || event.metaKey
+                    || event.shiftKey || event.altKey || !canOpenImageLightbox()) return;
+                  event.preventDefault();
+                  openImage(item, event.currentTarget);
                 }}><Media media={item.media} /></a>
                 {item.media.kind !== 'photo' && <p className="media-label">{item.media.kind === 'poster' ? 'Afiche de archivo; no es una convocatoria vigente.' : 'Identidad del encuentro; no es una fotografía.'}</p>}
               </>}

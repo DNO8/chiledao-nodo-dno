@@ -8,6 +8,12 @@ export type LightboxImage = {
   caption: string;
 };
 
+export function canOpenImageLightbox() {
+  return typeof HTMLDialogElement !== 'undefined'
+    && typeof HTMLDialogElement.prototype.showModal === 'function'
+    && typeof HTMLDialogElement.prototype.close === 'function';
+}
+
 export default function ImageLightbox({ image, invoker, onClose }: {
   image: LightboxImage | null;
   invoker: HTMLElement | null;
@@ -18,6 +24,9 @@ export default function ImageLightbox({ image, invoker, onClose }: {
   useEffect(() => {
     const dialog = ref.current;
     if (!image || !dialog) return;
+    // Capability can change after activation. A failed modal must still deliver
+    // the original image, before acquiring any body or document scroll styles.
+    if (!canOpenImageLightbox()) { window.location.assign(image.fullSrc); return; }
     const x = scrollX, y = scrollY;
     const owner = invoker?.closest('[data-timeline]');
     const imageId = invoker?.getAttribute('data-timeline-image');
@@ -29,7 +38,8 @@ export default function ImageLightbox({ image, invoker, onClose }: {
     ] as const;
     const previous = declarations.map(([element, property]) => ({ element, property,
       value: element.style.getPropertyValue(property), priority: element.style.getPropertyPriority(property) }));
-    dialog.showModal();
+    try { dialog.showModal(); }
+    catch { window.location.assign(image.fullSrc); return; }
     declarations.forEach(([element, property, value]) => element.style.setProperty(property, value));
     return () => {
       dialog.close();

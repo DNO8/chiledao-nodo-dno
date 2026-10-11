@@ -218,7 +218,10 @@ test('desktop, mobile and footer share four links and every fragment resolves on
   }
   const toggle = one(byId('menu-toggle'), 'mobile toggle');
   assert.equal(toggle.attrs['aria-expanded'], 'false');
-  one(byId(toggle.attrs['aria-controls']), 'mobile menu target');
+  assert.ok(toggle.attrs.class.split(/\s+/).includes('hidden'), 'enhancement-only toggle is hidden in SSR');
+  const menu = one(byId(toggle.attrs['aria-controls']), 'mobile menu target');
+  assert.ok(!menu.attrs.class.split(/\s+/).includes('hidden'), 'SSR mobile links are not hidden');
+  assert.ok(menu.attrs.class.split(/\s+/).includes('md:hidden'), 'desktop keeps only its existing navigation');
 });
 
 test('homepage has six ordered blocks and exactly the three intended React islands', () => {
