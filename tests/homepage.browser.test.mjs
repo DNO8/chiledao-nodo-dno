@@ -106,6 +106,263 @@ async function connect(url) {
   };
 }
 
+test('observer ownership and reduced-motion drag', { timeout: 150000 }, async (t) => {
+  await access(temporary);
+  await access(browserPath);
+  const html = await readFile(join(root, 'index.html'), 'utf8');
+  const timelinePath = [...html.matchAll(/component-url="([^"]+)"/g)].map(m => m[1]).find(p => /timeline\./.test(p));
+  const timelineModule = await readFile(join(root, timelinePath), 'utf8');
+  const triggerPath = new URL(timelineModule.match(/import\(["'`]([^"'`()]*ScrollTrigger[^"'`()]*)["'`]\)/)[1],
+    `http://localhost${timelinePath}`).pathname;
+  const triggerModule = await readFile(join(root, triggerPath), 'utf8');
+  const triggerSymbol = triggerModule.match(/([\w$]+) as ScrollTrigger\b/)[1];
+  const hosted = await staticServer();
+  const profile = await mkdtemp(join(temporary, 'chiledao-ownership-profile-'));
+  const browser = spawn(browserPath, [
+    '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+    `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
+    '--disable-background-networking', '--disable-component-update', '--disable-sync',
+    '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
+  ], { stdio: 'ignore', windowsHide: true });
+  let cdp, injection, instrument = false, errors = [], moduleReceipts = [];
+  try {
+    const port = await until(async () => {
+      try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
+      catch { return false; }
+    }, 'owned ownership browser port', 15000);
+    const page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(p => p.type === 'page');
+    cdp = await connect(page.webSocketDebuggerUrl);
+    cdp.on('Fetch.requestPaused', async ({ requestId, request }) => {
+      const url = new URL(request.url);
+      const allowed = url.origin === hosted.origin || url.protocol === 'data:'
+        || (url.protocol === 'blob:' && request.url.startsWith(`blob:${hosted.origin}/`));
+      if (instrument && url.origin === hosted.origin && url.pathname === triggerPath) {
+        const body = triggerModule + `\nwindow.__instrumentTrigger(${triggerSymbol});`;
+        await cdp.send('Fetch.fulfillRequest', { requestId, responseCode: 200,
+          responseHeaders: [{ name: 'Content-Type', value: 'text/javascript' }], body: Buffer.from(body).toString('base64') });
+        moduleReceipts.push(url.pathname);
+      } else await cdp.send(allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest',
+        { requestId, ...(allowed ? {} : { errorReason: 'BlockedByClient' }) });
+    });
+    cdp.on('Runtime.exceptionThrown', ({ exceptionDetails }) => errors.push(exceptionDetails.exception?.description ?? exceptionDetails.text));
+    cdp.on('Runtime.consoleAPICalled', ({ type, args }) => {
+      if (type === 'error') errors.push(args.map(a => a.value ?? a.description).join(' '));
+    });
+    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+    await cdp.send('Page.enable'); await cdp.send('Runtime.enable');
+    await cdp.send('Network.enable'); await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
+    await cdp.send('Target.activateTarget', { targetId: page.id }); await cdp.send('Page.bringToFront');
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    const evaluate = async expression => {
+      const result = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+      assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails));
+      return result.result.value;
+    };
+    const reduce = value => cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value }] });
+    const load = async (source = '', fault = false) => {
+      if (injection) await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: injection });
+      errors = []; moduleReceipts = []; instrument = fault;
+      ({ identifier: injection } = await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: source || ';' }));
+      await cdp.send('Page.navigate', { url: hosted.origin });
+      await until(() => evaluate(`document.readyState==='complete' && [...document.querySelectorAll('astro-island')]
+        .filter(i=>/WorksWheelShowcase|timeline/.test(i.getAttribute('component-url'))).every(i=>!i.hasAttribute('ssr'))
+        && !!document.querySelector('[data-works-stage]')`), 'real hero and timeline hydration');
+      await evaluate('new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))');
+    };
+    const clean = () => { assert.deepEqual(errors, [], 'no unaccounted browser errors'); assert.deepEqual(cdp.errors, []); };
+    const key = async key => {
+      const code = { Enter: 13, ArrowRight: 39, Home: 36 }[key];
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key, code: key, windowsVirtualKeyCode: code,
+        ...(key === 'Enter' ? { text: '\r' } : {}) });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key, windowsVirtualKeyCode: code });
+    };
+    await t.test('missing ResizeObserver retains the hydrated native eight-artwork ring', async () => {
+      await reduce('reduce');
+      await load(`window.ResizeObserver=undefined;window.__heroOriginal=null;
+        const watch=new MutationObserver(()=>{const a=document.querySelector('[data-hero-photo]');
+          if(a&&!window.__heroOriginal){window.__heroOriginal=a;window.__heroImages=[...document.querySelectorAll('[data-hero-photo] img')].map(i=>i.getAttribute('src'));watch.disconnect();}});
+        watch.observe(document,{childList:true,subtree:true});`);
+      t.diagnostic(`Missing observer runtime errors: ${JSON.stringify(errors)}`);
+      clean();
+      assert.equal(await evaluate(`window.__heroOriginal===document.querySelector('[data-hero-photo]')`), true);
+      assert.deepEqual(await evaluate(`[...document.querySelectorAll('[data-hero-photo] img')].map(i=>i.getAttribute('src'))`),
+        await evaluate('window.__heroImages'));
+      assert.equal(await evaluate(`document.querySelectorAll('[data-hero-photo]').length`), 8);
+      assert.equal(await evaluate(`document.querySelector('[data-works-stage]').getAttribute('role')`), 'group');
+      assert.equal(await evaluate(`document.querySelector('[data-timeline]').hasAttribute('data-enhanced')`), false);
+      await evaluate(`document.querySelector('[data-hero-photo]').focus({preventScroll:true})`);
+      const href = await evaluate(`document.activeElement.href`);
+      await key('Enter');
+      await until(async () => (await cdp.send('Page.getFrameTree')).frameTree.frame.url === href, 'native hydrated artwork keyboard navigation');
+      clean();
+      await reduce('no-preference'); await load(`window.ResizeObserver=undefined;
+        window.__guardListeners=0;window.__instrumentTrigger=ST=>{const add=ST.addEventListener;
+          ST.addEventListener=function(...args){window.__guardListeners++;return add.apply(this,args);};};`, true);
+      await until(() => evaluate('window.__guardListeners===2'), 'timeline plugin setup completed with only effect-level listeners');
+      await evaluate('new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))');
+      assert.equal(await evaluate(`document.querySelector('[data-timeline]').hasAttribute('data-enhanced')`), false,
+        'otherwise eligible timeline preflights the missing observer');
+      assert.equal(await evaluate(`document.querySelectorAll('[data-work-card]').length===8
+        && [...document.querySelectorAll('[data-work-card]')].every(e=>!e.style.transform && e.getBoundingClientRect().width>0)`), true,
+        'unmeasured hydrated hero keeps the CSS ring pose');
+      const target = await evaluate(`(async () => {const a=document.querySelectorAll('[data-hero-photo]')[2];
+        await a.querySelector('img').decode();a.scrollIntoView({block:'center',behavior:'instant'});
+        const r=a.getBoundingClientRect();return {href:a.href,x:r.x+r.width/2,y:r.y+r.height/2,
+          hit:a.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))};})()`);
+      assert.equal(target.hit, true, 'native artwork pointer target is reachable');
+      for (const type of ['mousePressed', 'mouseReleased']) await cdp.send('Input.dispatchMouseEvent',
+        { type, button: 'left', clickCount: 1, x: target.x, y: target.y });
+      await until(async () => (await cdp.send('Page.getFrameTree')).frameTree.frame.url === target.href, 'native hydrated artwork pointer navigation');
+      clean();
+    });
+    await t.test('reduced held drag publishes direct poses without stale-target redraw or idle animation', async () => {
+      await reduce('reduce'); await load(`window.__pointerReceipt={id:null,captured:0,lost:0};
+        document.addEventListener('gotpointercapture',e=>{if(e.target.matches('.pl-root')){window.__pointerReceipt.id=e.pointerId;window.__pointerReceipt.captured++;}});
+        document.addEventListener('lostpointercapture',e=>{if(e.target.matches('.pl-root'))window.__pointerReceipt.lost++;});`);
+      await evaluate(`document.querySelector('#formacion').scrollIntoView({block:'center',behavior:'instant'})`);
+      await until(() => evaluate(`document.querySelector('.pl-root')?.dataset.reduced==='true'`), 'visible reduced gallery');
+      await delay(300);
+      const pose = () => evaluate(`(() => {const r=document.querySelector('.pl-root');return {offset:Number(r.dataset.offset),
+        draws:Number(r.dataset.draws),drag:r.dataset.drag,velocity:Number(r.dataset.velocity),
+        transforms:[...r.querySelectorAll('.pl-card')].map(e=>e.style.transform)};})()`);
+      const before = await pose();
+      const point = await evaluate(`(() => {const r=document.querySelector('.pl-root').getBoundingClientRect();return {x:r.x+r.width*.6,y:r.y+100};})()`);
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', buttons: 1, clickCount: 1, ...point });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', button: 'left', buttons: 1, x: point.x-70, y: point.y });
+      const held = await pose();
+      t.diagnostic(`Held reduced drag: ${JSON.stringify({before,held})}`);
+      assert.equal(held.drag, '1');
+      assert.equal(await evaluate(`document.querySelector('.pl-root').hasPointerCapture(window.__pointerReceipt.id)`), true);
+      assert.ok(Math.abs(held.offset-before.offset-70)<.2, 'held pointer publishes direct offset before release');
+      assert.notDeepEqual(held.transforms, before.transforms, 'actual rendered cards follow held pointer');
+      await evaluate(`document.dispatchEvent(new Event('visibilitychange'))`);
+      const redrawn = await pose();
+      assert.ok(redrawn.draws>held.draws, 'visibility notification actually redraws the held pose');
+      assert.equal(redrawn.offset, held.offset, 'legitimate controller redraw cannot restore stale target');
+      const idle = await pose(); await delay(150); assert.deepEqual(await pose(), idle, 'held reduced mode schedules no idle draws');
+      assert.ok(idle.transforms.every(p=>new RegExp('rotate\\(0(?:\\.0+)?rad\\)$').test(p)), 'every card has zero reduced swing');
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', buttons: 0, clickCount: 1, x: point.x-70, y: point.y });
+      assert.equal((await pose()).drag, '0'); assert.equal((await pose()).velocity, 0);
+      assert.equal((await pose()).offset, before.offset, 'release selects the nearest pose without velocity projection');
+      assert.equal(await evaluate(`document.querySelector('.pl-root').hasPointerCapture(window.__pointerReceipt.id)`), false,
+        'native release clears owned pointer capture');
+      // A second real held gesture exercises the cancellation path without
+      // changing the browser's native pointer acquisition and movement.
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mousePressed', button: 'left', buttons: 1, clickCount: 1, ...point });
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseMoved', button: 'left', buttons: 1, x: point.x-35, y: point.y });
+      await evaluate(`document.querySelector('.pl-root').dispatchEvent(new PointerEvent('pointercancel',
+        {bubbles:true,pointerId:window.__pointerReceipt.id,pointerType:'mouse'}))`);
+      assert.equal((await pose()).drag, '0');
+      assert.equal(await evaluate(`document.querySelector('.pl-root').hasPointerCapture(window.__pointerReceipt.id)`), false,
+        'cancellation clears owned capture');
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseReleased', button: 'left', buttons: 0, clickCount: 1, x: point.x-35, y: point.y });
+      await evaluate(`document.querySelector('.pl-root').focus({preventScroll:true})`); await key('ArrowRight');
+      assert.ok((await pose()).offset>idle.offset, 'reduced keyboard navigation still publishes a destination');
+      await key('Home');
+      await reduce('no-preference');
+      await until(() => evaluate(`!!document.querySelector('[data-timeline]').dataset.enhanced`), 'live normal timeline layout');
+      await evaluate(`document.querySelector('.pl-root').scrollIntoView({block:'center',behavior:'instant'})`);
+      await until(() => evaluate(`document.querySelector('.pl-root').dataset.reduced==='false'`), 'live normal preference');
+      await reduce('reduce');
+      await until(() => evaluate(`!document.querySelector('[data-timeline]').dataset.enhanced`), 'live static timeline layout');
+      await evaluate(`document.querySelector('.pl-root').scrollIntoView({block:'center',behavior:'instant'})`);
+      await until(() => evaluate(`document.querySelector('.pl-root').dataset.reduced==='true'`), 'live reduced preference');
+      await delay(300); // Allow the finite layout/visibility notifications to settle.
+      const settled = await pose(); await delay(150); assert.deepEqual(await pose(), settled, 'live reduced mode stops animation');
+      clean();
+    });
+    await t.test('timeline acquisition failure releases its real global callback, focus owner and queued refresh', async () => {
+      await reduce('no-preference');
+      const ownershipSource = `window.__failTimeline=true;
+        window.__ownership={rows:[],images:[],failed:false,disconnected:false,queued:[],cancelled:[]};
+        const addImage=EventTarget.prototype.addEventListener,removeImage=EventTarget.prototype.removeEventListener;
+        EventTarget.prototype.addEventListener=function(type,callback,...rest){
+          if(type==='load'&&this instanceof HTMLImageElement&&this.closest('[data-timeline]'))
+            window.__ownership.images.push({element:this,callback,removed:false});
+          return addImage.call(this,type,callback,...rest);
+        };
+        EventTarget.prototype.removeEventListener=function(type,callback,...rest){
+          const row=window.__ownership.images.findLast(r=>r.element===this&&r.callback===callback&&!r.removed);
+          if(type==='load'&&row)row.removed=true;return removeImage.call(this,type,callback,...rest);
+        };
+        window.__instrumentTrigger=ST=>{
+          window.__ST=ST;const add=ST.addEventListener,remove=ST.removeEventListener;
+          ST.addEventListener=function(type,callback){window.__ownership.rows.push({type,callback,removed:false});return add.call(this,type,callback);};
+          ST.removeEventListener=function(type,callback){const row=window.__ownership.rows.findLast(r=>r.type===type&&r.callback===callback&&!r.removed);
+            if(row)row.removed=true;return remove.call(this,type,callback);};
+        };
+        const request=window.requestAnimationFrame,cancel=window.cancelAnimationFrame;
+        window.requestAnimationFrame=callback=>{const id=request(callback);if(window.__queueReceipt)window.__ownership.queued.push(id);return id;};
+        window.cancelAnimationFrame=id=>{window.__ownership.cancelled.push(id);cancel(id);};
+        const Native=window.ResizeObserver;
+        window.ResizeObserver=class {
+          constructor(callback){this.callback=callback;this.native=new Native(callback);this.timeline=false;}
+          observe(element){
+            if(element.matches('[data-timeline-canvas]')){this.timeline=true;this.native.observe(element);
+              window.__ownership.local=window.__ownership.rows.findLast(r=>r.type==='refresh');
+              window.__ownership.refresh=this.callback;
+              window.__queueReceipt=true;this.callback([]);window.__queueReceipt=false;return;}
+            if(window.__failTimeline&&this.timeline&&element.matches('[data-timeline-track]')){window.__ownership.failed=true;throw new Error('Controlled timeline observe failure');}
+            this.native.observe(element);
+          }
+          unobserve(element){this.native.unobserve(element);}
+          disconnect(){if(this.timeline)window.__ownership.disconnected=true;this.native.disconnect();}
+        };`;
+      await load(ownershipSource, true);
+      await until(() => evaluate('window.__ownership.failed'), 'controlled observer failure after local refresh acquisition');
+      assert.deepEqual(moduleReceipts, [triggerPath], 'exact real built GSAP module instrumented once');
+      const receipt = await evaluate(`({failed:window.__ownership.failed,local:!!window.__ownership.local,
+        removed:window.__ownership.local?.removed,disconnected:window.__ownership.disconnected,
+        queued:window.__ownership.queued,cancelled:window.__ownership.cancelled,
+        live:window.__ownership.rows.filter(r=>!r.removed).map(r=>r.type),
+        enhanced:document.querySelector('[data-timeline]').hasAttribute('data-enhanced')})`);
+      t.diagnostic(`Partial timeline ownership receipts: ${JSON.stringify(receipt)}`);
+      assert.equal(receipt.local, true, 'failure occurs after actual global callback registration');
+      assert.equal(receipt.removed, true, 'same callback identity is released on partial failure');
+      assert.equal(receipt.disconnected, true, 'partially acquired observer is disconnected');
+      assert.ok(receipt.queued.length>0 && receipt.queued.every(id=>receipt.cancelled.includes(id)), 'owned queued refresh is cancelled');
+      assert.deepEqual(receipt.live, [], 'all acquired global refresh listeners released');
+      assert.equal(receipt.enhanced, false);
+      assert.equal(await evaluate('window.__ownership.images.filter(r=>r.callback===window.__ownership.refresh).length'), 0,
+        'failure precedes owned image listener acquisition (React native load listeners are separate)');
+      assert.equal(await evaluate(`document.querySelectorAll('[data-timeline] .timeline-split-line, [data-timeline] [data-reached]').length`), 0);
+      assert.equal(await evaluate(`getComputedStyle(document.querySelector('[data-timeline-track]')).transform`), 'none');
+      const scroll = await evaluate(`(() => {document.querySelector('[data-timeline]').scrollIntoView({block:'start',behavior:'instant'});return scrollY;})()`);
+      await evaluate(`document.querySelectorAll('[data-timeline-image]')[5].focus({preventScroll:true})`);
+      assert.equal(await evaluate('scrollY'), scroll, 'retired desktop focus aligner cannot move native static page');
+      await evaluate('window.__ST.refresh()'); clean();
+      const queued = await evaluate('window.__ownership.queued.length');
+      await evaluate('window.__queueReceipt=true;window.__ownership.refresh([]);window.__queueReceipt=false;');
+      assert.equal(await evaluate('window.__ownership.queued.length'), queued, 'retired observer callback cannot schedule work');
+      await load(ownershipSource.replace('window.__failTimeline=true', 'window.__failTimeline=false'), true);
+      await until(() => evaluate(`document.querySelector('[data-timeline]').dataset.ownedTriggers==='22'`), 'normal acquired desktop enhancement');
+      assert.equal(await evaluate('window.__ownership.rows.filter(r=>!r.removed).length'), 3);
+      await reduce('reduce');
+      await until(() => evaluate(`!document.querySelector('[data-timeline]').dataset.enhanced`), 'normal context teardown');
+      assert.equal(await evaluate('window.__ownership.local.removed && window.__ownership.disconnected'), true,
+        'normal teardown releases the same local callback and observer');
+      assert.equal(await evaluate('window.__ownership.rows.filter(r=>!r.removed).length'), 2, 'only the two effect-level refresh listeners remain');
+      assert.equal(await evaluate(`(() => {const rows=window.__ownership.images.filter(r=>r.callback===window.__ownership.refresh);
+        return rows.length===6&&rows.every(r=>r.removed);})()`), true,
+        'normal teardown removes each acquired image-load callback');
+      const afterTeardown = await evaluate('window.__ownership.queued.length');
+      await evaluate(`(async()=>{window.__queueReceipt=true;window.__ownership.refresh([]);
+        document.querySelectorAll('[data-timeline] img').forEach(i=>i.dispatchEvent(new Event('load')));
+        await document.fonts.ready;window.__queueReceipt=false;})()`);
+      assert.equal(await evaluate('window.__ownership.queued.length'), afterTeardown, 'retired load and observer callbacks schedule no refresh');
+      assert.equal(await evaluate(`document.querySelectorAll('[data-timeline] .timeline-split-line, [data-timeline] [data-reached]').length`), 0);
+      await reduce('no-preference');
+      await until(() => evaluate(`document.querySelector('[data-timeline]').dataset.ownedTriggers==='22'`), 'clean enhancement reentry');
+      assert.equal(await evaluate('window.__ownership.rows.filter(r=>!r.removed).length'), 3, 'reentry does not duplicate global callbacks');
+      clean();
+    });
+  } finally {
+    if (cdp) { try { await cdp.send('Browser.close'); } catch {} cdp.close(); }
+    if (browser.exitCode === null) browser.kill();
+    hosted.server.closeAllConnections(); await new Promise(done => hosted.server.close(done));
+  }
+});
+
 test('progressive enhancement capability fallbacks', { timeout: 150000 }, async (t) => {
   await access(temporary);
   await access(browserPath);

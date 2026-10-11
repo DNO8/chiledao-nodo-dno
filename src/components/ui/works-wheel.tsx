@@ -114,6 +114,7 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
       onControlsHeightChange?.(0);
       return;
     }
+    if (typeof ResizeObserver !== 'function') return;
     const read = () => {
       const height = element.offsetHeight;
       setControlsHeight(height);
@@ -127,7 +128,9 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
 
   React.useEffect(() => {
     const el = stageRef.current;
-    if (!el) return;
+    // Keep stage.w at zero when measurement cannot be maintained. That leaves
+    // the original CSS ring and native artwork anchors in control.
+    if (!el || typeof ResizeObserver !== 'function') return;
     const read = () => setStage({ w: el.clientWidth, h: el.clientHeight });
     read();
     const ro = new ResizeObserver(read);

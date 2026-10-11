@@ -20,7 +20,7 @@ export default function WorksWheelShowcase({ items }: { items: ShowcaseWork[] })
   React.useEffect(() => setMounted(true), []);
   React.useEffect(() => {
     const element = details.current;
-    if (!element) return;
+    if (!element || typeof ResizeObserver !== 'function') return;
     const read = () => setDetailsHeight(element.offsetHeight);
     read();
     const observer = new ResizeObserver(read);
@@ -29,7 +29,7 @@ export default function WorksWheelShowcase({ items }: { items: ShowcaseWork[] })
   }, []);
   React.useEffect(() => {
     const element = intro.current;
-    if (!element) return;
+    if (!element || typeof ResizeObserver !== 'function') return;
     const read = () => setIntroSize({ w: element.offsetWidth, h: element.offsetHeight });
     read();
     const observer = new ResizeObserver(read);

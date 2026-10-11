@@ -116,13 +116,11 @@ export default function Timeline({ items }: { items: TimelineItem[] }) {
         };
         mm.add({ desktop: '(min-width: 1024px)', mobile: '(max-width: 1023px)',
           tall: '(min-height: 800px)', reduce: '(prefers-reduced-motion: reduce)' }, context => {
-          if (context.conditions?.reduce || (context.conditions?.desktop && !context.conditions?.tall) || disposed) return;
-          const splits: ReturnType<typeof SplitText.create>[] = [];
+          if (context.conditions?.reduce || (context.conditions?.desktop && !context.conditions?.tall)
+            || disposed || typeof ResizeObserver !== 'function') return;
           let active = true;
           const desktop = !!context.conditions?.desktop;
           const axis = desktop ? 'scaleX' : 'scaleY';
-          root.dataset.enhanced = 'true';
-          root.dataset.mode = desktop ? 'horizontal' : 'vertical';
           const distance = () => Math.max(0, track.scrollWidth - canvas.clientWidth);
           const header = () => document.querySelector('header')?.getBoundingClientRect().height ?? 65;
           const range = () => Math.max(1, root.offsetHeight - canvas.offsetHeight);
@@ -147,6 +145,7 @@ export default function Timeline({ items }: { items: TimelineItem[] }) {
             });
           };
           const measurePoints = () => {
+            if (!active) return;
             // These offsets share the untransformed track coordinate system.
             // Reject unknown offset parents or hidden/zero-size geometry.
             points.forEach(point => {
@@ -161,50 +160,13 @@ export default function Timeline({ items }: { items: TimelineItem[] }) {
             });
             syncPoints();
           };
-          const progression = gsap.timeline({ defaults: { ease: 'none' },
-            onUpdate: syncPoints,
-            scrollTrigger: { id: 'chile-dao-timeline', trigger: desktop ? root : track,
-              start: desktop ? start : 'top center',
-              end: desktop ? end : () => `+=${line?.offsetHeight ?? track.offsetHeight}`, scrub: true,
-              invalidateOnRefresh: true,
-              onUpdate: self => { root.dataset.progress = self.progress.toFixed(4); } } });
-          if (desktop) progression.fromTo(track, { x: 0 }, { x: () => -distance(), duration: 1 });
-          alignFocused.current = desktop ? element => {
-            if (root.querySelector('dialog[open]')) return;
-            const entry = element.closest<HTMLElement>('[data-milestone]');
-            if (!entry) return;
-            // Align the focused column through the same vertical progress model.
-            const offset = Math.min(distance(), Math.max(0, entry.offsetLeft - 32));
-            const progress = offset / (distance() || 1);
-            window.scrollTo({ top: scrollY + root.getBoundingClientRect().top - header() + range() * progress, behavior: 'instant' });
-            progression.scrollTrigger?.update();
-          } : () => {};
-          root.dataset.progress = String(progression.scrollTrigger?.progress ?? 0);
-          progression.fromTo(line, { [axis]: 0 }, { [axis]: 1, duration: 1 }, 0);
-          measurePoints();
-          ScrollTrigger.addEventListener('refresh', measurePoints);
-          if (desktop) entries.forEach(entry => {
-            // A milestone reveals before its column reaches the canvas centre.
-            const initial = entry.offsetLeft + entry.clientWidth <= canvas.clientWidth;
-            const revealEnd = () => Math.min(1, Math.max(0,
-              (entry.offsetLeft + entry.clientWidth - canvas.clientWidth) / (distance() || 1)));
-            const ownedTrigger = () => ({ trigger: root,
-              start: () => `top+=${range() * Math.max(0, revealEnd() - .14)} top+=${header()}`,
-              end: () => `top+=${range() * Math.max(.01, revealEnd())} top+=${header()}`,
-              scrub: true, invalidateOnRefresh: true });
-            gsap.fromTo(entry.querySelector('[data-stem]'), { scaleY: initial ? 1 : 0 },
-              { scaleY: 1, ease: 'none', scrollTrigger: ownedTrigger() });
-            for (const element of entry.querySelectorAll<HTMLElement>('[data-reveal]')) {
-              const split = SplitText.create(element, { type: 'lines', mask: 'lines', linesClass: 'timeline-split-line',
-                aria: 'auto', autoSplit: true,
-                onSplit: self => gsap.fromTo(self.lines, { yPercent: initial ? 0 : 110 },
-                  { yPercent: 0, ease: 'power2.out', stagger: .02, scrollTrigger: ownedTrigger() }) });
-              splits.push(split);
-            }
-          });
-          root.dataset.ownedTriggers = String(desktop ? 1 + entries.length * 3 : 1);
-          // Refresh only after actual layout inputs, never via an idle RAF loop.
+          // Local ownership starts before enhancement acquisition. GSAP keeps
+          // ownership of its animations, triggers and SplitText resources.
           let frame = 0;
+          let observer: ResizeObserver | undefined;
+          let listening = false;
+          const images = [...root.querySelectorAll('img')];
+          const listeningImages: HTMLImageElement[] = [];
           const refresh = () => {
             if (active && !frame) frame = requestAnimationFrame(() => {
               frame = 0;
@@ -215,22 +177,16 @@ export default function Timeline({ items }: { items: TimelineItem[] }) {
               }
             });
           };
-          const observer = new ResizeObserver(refresh);
-          observer.observe(canvas);
-          observer.observe(track);
-          const images = [...root.querySelectorAll('img')];
-          images.forEach(image => image.addEventListener('load', refresh));
-          void document.fonts.ready.then(() => { if (active && !disposed) refresh(); });
-          refresh();
-          return () => {
+          const disposeMode = () => {
+            if (!active) return;
             active = false;
-            ScrollTrigger.removeEventListener('refresh', measurePoints);
+            if (listening) ScrollTrigger.removeEventListener('refresh', measurePoints);
             points.forEach(({ dot }) => dot.removeAttribute('data-reached'));
             alignFocused.current = () => {};
-            observer.disconnect();
-            images.forEach(image => image.removeEventListener('load', refresh));
+            observer?.disconnect();
+            listeningImages.forEach(image => image.removeEventListener('load', refresh));
             cancelAnimationFrame(frame);
-            splits.forEach(split => split.revert());
+            frame = 0;
             // Breakpoint re-entry can snapshot a previous measured translate.
             // The static DOM owns no inline transforms: restore that boundary.
             for (const element of [track, line, ...root.querySelectorAll<HTMLElement>('[data-stem], [data-dot]')]) {
@@ -245,6 +201,66 @@ export default function Timeline({ items }: { items: TimelineItem[] }) {
             delete root.dataset.progress;
             delete root.dataset.ownedTriggers;
           };
+          try {
+            root.dataset.enhanced = 'true';
+            root.dataset.mode = desktop ? 'horizontal' : 'vertical';
+            const progression = gsap.timeline({ defaults: { ease: 'none' },
+              onUpdate: syncPoints,
+              scrollTrigger: { id: 'chile-dao-timeline', trigger: desktop ? root : track,
+                start: desktop ? start : 'top center',
+                end: desktop ? end : () => `+=${line?.offsetHeight ?? track.offsetHeight}`, scrub: true,
+                invalidateOnRefresh: true,
+                onUpdate: self => { root.dataset.progress = self.progress.toFixed(4); } } });
+            if (desktop) progression.fromTo(track, { x: 0 }, { x: () => -distance(), duration: 1 });
+            alignFocused.current = desktop ? element => {
+              if (!active || root.querySelector('dialog[open]')) return;
+              const entry = element.closest<HTMLElement>('[data-milestone]');
+              if (!entry) return;
+              // Align the focused column through the same vertical progress model.
+              const offset = Math.min(distance(), Math.max(0, entry.offsetLeft - 32));
+              const progress = offset / (distance() || 1);
+              window.scrollTo({ top: scrollY + root.getBoundingClientRect().top - header() + range() * progress, behavior: 'instant' });
+              progression.scrollTrigger?.update();
+            } : () => {};
+            root.dataset.progress = String(progression.scrollTrigger?.progress ?? 0);
+            progression.fromTo(line, { [axis]: 0 }, { [axis]: 1, duration: 1 }, 0);
+            measurePoints();
+            ScrollTrigger.addEventListener('refresh', measurePoints);
+            listening = true;
+            if (desktop) entries.forEach(entry => {
+              // A milestone reveals before its column reaches the canvas centre.
+              const initial = entry.offsetLeft + entry.clientWidth <= canvas.clientWidth;
+              const revealEnd = () => Math.min(1, Math.max(0,
+                (entry.offsetLeft + entry.clientWidth - canvas.clientWidth) / (distance() || 1)));
+              const ownedTrigger = () => ({ trigger: root,
+                start: () => `top+=${range() * Math.max(0, revealEnd() - .14)} top+=${header()}`,
+                end: () => `top+=${range() * Math.max(.01, revealEnd())} top+=${header()}`,
+                scrub: true, invalidateOnRefresh: true });
+              gsap.fromTo(entry.querySelector('[data-stem]'), { scaleY: initial ? 1 : 0 },
+                { scaleY: 1, ease: 'none', scrollTrigger: ownedTrigger() });
+              for (const element of entry.querySelectorAll<HTMLElement>('[data-reveal]')) {
+                SplitText.create(element, { type: 'lines', mask: 'lines', linesClass: 'timeline-split-line',
+                  aria: 'auto', autoSplit: true,
+                  onSplit: self => gsap.fromTo(self.lines, { yPercent: initial ? 0 : 110 },
+                    { yPercent: 0, ease: 'power2.out', stagger: .02, scrollTrigger: ownedTrigger() }) });
+              }
+            });
+            root.dataset.ownedTriggers = String(desktop ? 1 + entries.length * 3 : 1);
+            // Refresh only after actual layout inputs, never via an idle RAF loop.
+            observer = new ResizeObserver(refresh);
+            observer.observe(canvas);
+            observer.observe(track);
+            images.forEach(image => {
+              image.addEventListener('load', refresh);
+              listeningImages.push(image);
+            });
+            void document.fonts.ready.then(() => { if (active && !disposed) refresh(); });
+            refresh();
+            return disposeMode;
+          } catch (error) {
+            disposeMode();
+            throw error;
+          }
         }, root);
       }).catch(() => {
         cleanup();

@@ -157,7 +157,10 @@ export default function PolaroidLineCarousel({
       const { w, h, cw } = size;
       const y0 = Math.max(32, h * .12), d = drag.current;
       let lineVel = 0;
-      if (reduce) { S.off = S.target; S.vel = 0; }
+      if (reduce) {
+        if (!d?.moved) S.off = S.target;
+        S.vel = 0;
+      }
       else if (d?.moved) lineVel = d.v * 1000;
       else {
         const before = S.off;
@@ -250,6 +253,7 @@ export default function PolaroidLineCarousel({
     if (off < 0) off *= .35;
     if (off > max) off = max + (off - max) * .35;
     sim.current.off = off;
+    if (reduced.current) wake.current();
   };
   const release = (e: React.PointerEvent) => {
     if (rootRef.current?.hasPointerCapture(e.pointerId)) rootRef.current.releasePointerCapture(e.pointerId);
@@ -260,8 +264,8 @@ export default function PolaroidLineCarousel({
     drag.current = null; lastTouch.current = performance.now(); release(e);
     if (!d || d.vertical) return;
     if (d.moved) {
-      sim.current.vel = -d.v * 1000;
-      goTo(nearestAt(sim.current.off - d.v * 180, spacing, n)); return;
+      sim.current.vel = reduced.current ? 0 : -d.v * 1000;
+      goTo(nearestAt(sim.current.off - (reduced.current ? 0 : d.v * 180), spacing, n)); return;
     }
     const card = (e.target as HTMLElement).closest('[data-i]');
     if (card) goTo(Number(card.getAttribute('data-i')));
