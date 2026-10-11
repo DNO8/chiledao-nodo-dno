@@ -6,7 +6,7 @@ import { dirname, extname, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
-import { cleanupOwnedBrowser } from './helpers/browser-cleanup.mjs';
+import { acquireOwnedBrowser, cleanupOwnedBrowser } from './helpers/browser-cleanup.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../dist');
 const temporary = join(tmpdir(), 'opencode');
@@ -52,10 +52,16 @@ async function staticServer() {
       response.writeHead(404).end();
     }
   });
-  await new Promise((done, reject) => {
-    server.once('error', reject);
-    server.listen(0, '127.0.0.1', done);
-  });
+  try {
+    await new Promise((done, reject) => {
+      const failed = error => { server.removeListener('error', failed); reject(error); };
+      server.once('error', failed);
+      try { server.listen(0, '127.0.0.1', () => { server.removeListener('error', failed); done(); }); }
+      catch (error) { failed(error); }
+    });
+  } catch (primaryError) {
+    await cleanupOwnedBrowser({ server, primaryError });
+  }
   return { server, origin: `http://127.0.0.1:${server.address().port}` };
 }
 
@@ -65,7 +71,11 @@ async function connect(url) {
     const retire = error => {
       clearTimeout(timeout);
       socket.removeEventListener('open', opened); socket.removeEventListener('error', failed);
-      if (error) { try { socket.close(); } catch {} reject(error); }
+      if (error) {
+        try { socket.close(); }
+        catch (cleanupError) { error.cleanupErrors = [cleanupError]; }
+        reject(error);
+      }
       else done();
     };
     const opened = () => retire(), failed = () => retire(new Error('CDP WebSocket failed'));
@@ -81,9 +91,10 @@ async function connect(url) {
     const id = ++serial;
     const timeout = setTimeout(() => { pending.delete(id); reject(new Error(`CDP timed out: ${method}`)); }, 10000);
     pending.set(id, { done, reject, timeout });
-    socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) }));
+    try { socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) })); }
+    catch (error) { pending.delete(id); clearTimeout(timeout); reject(error); }
   });
-  socket.addEventListener('message', ({ data }) => {
+  const receive = ({ data }) => {
     const message = JSON.parse(data);
     if (message.id) {
       const call = pending.get(message.id);
@@ -97,36 +108,134 @@ async function connect(url) {
         Promise.resolve(listener(message.params, message.sessionId)).catch((error) => errors.push(error.message));
       }
     }
-  });
+  };
+  socket.addEventListener('message', receive);
   return {
     send, errors,
     on(method, listener) {
       listeners.set(method, [...(listeners.get(method) ?? []), listener]);
     },
     close() {
-      socket.close();
-      for (const call of pending.values()) {
-        clearTimeout(call.timeout);
-        call.reject(new Error('Owned CDP connection closed'));
+      try { socket.close(); }
+      finally {
+        socket.removeEventListener('message', receive);
+        for (const call of pending.values()) {
+          clearTimeout(call.timeout);
+          call.reject(new Error('Owned CDP connection closed'));
+        }
+        pending.clear();
+        listeners.clear();
       }
-      pending.clear();
     },
   };
 }
+
+test('resource acquisition and palette regressions', { timeout: 60000 }, async (t) => {
+  await access(temporary); await access(browserPath);
+  let hosted, profile, browser, cdp, primaryError;
+  try {
+    ({ hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+      createProfile: () => mkdtemp(join(temporary, 'chiledao-palette-profile-')),
+      startBrowser: profile => spawn(browserPath, [
+      '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+      `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
+      '--disable-background-networking', '--disable-component-update', '--disable-sync',
+      '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
+    ], { stdio: 'ignore', windowsHide: true }),
+      report: result => t.diagnostic(`Palette acquisition cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}`),
+    }));
+    const port = await until(async () => {
+      try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
+      catch { return false; }
+    }, 'owned palette browser port', 15000);
+    const page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(p => p.type === 'page');
+    cdp = await connect(page.webSocketDebuggerUrl);
+    cdp.on('Fetch.requestPaused', async ({ requestId, request }) => {
+      const url = new URL(request.url);
+      const allowed = url.origin === hosted.origin || url.protocol === 'data:';
+      await cdp.send(allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest',
+        { requestId, ...(allowed ? {} : { errorReason: 'BlockedByClient' }) });
+    });
+    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+    await cdp.send('Page.enable'); await cdp.send('Runtime.enable');
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 390, height: 900, deviceScaleFactor: 1, mobile: false });
+    await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    const evaluate = async expression => {
+      const result = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+      assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails));
+      return result.result.value;
+    };
+    const key = async (name, code) => {
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: name, windowsVirtualKeyCode: code });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: name, windowsVirtualKeyCode: code });
+    };
+    await cdp.send('Page.navigate', { url: hosted.origin });
+    await until(() => evaluate(`document.readyState==='complete' && [...document.querySelectorAll('astro-island')]
+      .filter(i=>/timeline/.test(i.getAttribute('component-url'))).every(i=>!i.hasAttribute('ssr'))`), 'actual timeline hydration');
+    assert.deepEqual(await evaluate(`['--white','--red'].map(n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim())`), ['#f8f6ee', '#f31e32']);
+    const samples = [];
+    try {
+      for (const override of [false, true]) {
+        if (override) await evaluate(`document.documentElement.style.setProperty('--white','#aabbcc');document.documentElement.style.setProperty('--red','#123456')`);
+        await key('Tab', 9);
+        await evaluate(`window.__paletteLink=document.querySelector('[data-timeline-image]');window.__paletteLink.scrollIntoView({block:'center',behavior:'instant'});window.__paletteLink.focus({preventScroll:true})`);
+        // Allow live style invalidation and the existing reduced transitions to settle.
+        await evaluate('new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))');
+        const before = await evaluate(`({y:scrollY, focused:document.activeElement===window.__paletteLink,
+          visible:window.__paletteLink.matches(':focus-visible'), color:getComputedStyle(document.querySelector('[data-timeline]')).color,
+          focus:getComputedStyle(window.__paletteLink).outlineColor, accent:getComputedStyle(document.querySelector('.future-mark')).color,
+          line:getComputedStyle(document.querySelector('[data-journey-line]')).backgroundColor})`);
+        assert.equal(before.focused, true); assert.equal(before.visible, true);
+        await key('Enter', 13);
+        await until(() => evaluate(`!!document.querySelector('[data-image-lightbox][open]')`), 'normal timeline image modal');
+        const modal = await evaluate(`(()=>{const d=document.querySelector('[data-image-lightbox]'),b=d.querySelector('button'),r=d.getBoundingClientRect();return {
+          color:getComputedStyle(d).color,focus:getComputedStyle(b).outlineColor,visible:b.matches(':focus-visible'),
+          focused:document.activeElement===b,locked:document.body.style.position==='fixed',
+          background:getComputedStyle(d).backgroundColor,border:getComputedStyle(d).borderColor,
+          bounds:{x:r.x,y:r.y,width:r.width,height:r.height},inside:r.left>=0&&r.right<=innerWidth&&r.top>=0&&r.bottom<=innerHeight};})()`);
+        samples.push({ override, before, modal });
+        // Restore modal ownership even when a palette assertion fails.
+        await key('Escape', 27);
+        await until(() => evaluate(`!document.querySelector('[data-image-lightbox][open]')&&document.body.style.position!=='fixed'`), 'normal modal restoration');
+        assert.equal(await evaluate('document.activeElement===window.__paletteLink'), true);
+        assert.ok(Math.abs(await evaluate('scrollY') - before.y) < 1);
+      }
+      t.diagnostic(`Computed shared palette samples: ${JSON.stringify(samples)}`);
+      for (const { override, before, modal } of samples) {
+        const white = override ? 'rgb(170, 187, 204)' : 'rgb(248, 246, 238)';
+        const red = override ? 'rgb(18, 52, 86)' : 'rgb(243, 30, 50)';
+        assert.equal(before.color, white); assert.equal(before.focus, white);
+        assert.equal(before.accent, red); assert.equal(before.line, red);
+        assert.equal(modal.color, white); assert.equal(modal.focus, white);
+        assert.equal(modal.visible, true); assert.equal(modal.focused, true); assert.equal(modal.locked, true); assert.equal(modal.inside, true);
+        assert.equal(modal.background, 'rgb(14, 19, 32)');
+        assert.equal(modal.border, 'rgba(248, 246, 238, 0.4)', 'distinct alpha border remains unchanged');
+      }
+      assert.deepEqual(samples[1].modal.bounds, samples[0].modal.bounds, 'token substitution does not change modal geometry');
+      assert.deepEqual(cdp.errors, []);
+    } finally {
+      await evaluate(`document.documentElement.style.removeProperty('--white');document.documentElement.style.removeProperty('--red')`);
+    }
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp, server: hosted?.server, primaryError,
+      report: result => t.diagnostic(`Owned palette cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}`) });
+  }
+});
 
 test('motion focus and cleanup regressions', { timeout: 150000 }, async (t) => {
   await access(temporary); await access(browserPath);
   const html = await readFile(join(root, 'index.html'), 'utf8');
   const heroEntry = [...html.matchAll(/component-url="([^"]+)"/g)].map(m => m[1]).find(p => /WorksWheelShowcase\./.test(p));
   assert.ok(heroEntry, 'actual built hero entry identified');
-  const hosted = await staticServer();
-  const profile = await mkdtemp(join(temporary, 'chiledao-motion-focus-profile-'));
-  const browser = spawn(browserPath, [
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-motion-focus-profile-')),
+    startBrowser: profile => spawn(browserPath, [
     '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
-  ], { stdio: 'ignore', windowsHide: true });
+  ], { stdio: 'ignore', windowsHide: true }) });
   let cdp, gate = false, pendingEntry, primaryError;
   const errors = [];
   try {
@@ -198,6 +307,11 @@ test('motion focus and cleanup regressions', { timeout: 150000 }, async (t) => {
     const formation = async () => {
       await evaluate(`document.querySelector('[data-formation-polaroid]').scrollIntoView({block:'center',behavior:'instant'})`);
       await until(() => evaluate(`document.querySelector('.pl-root')?.dataset.draws>0`), 'visible enhanced formation');
+      // Late local image/font layout inputs can legitimately redraw a paused
+      // controller. Settle those inputs before asserting autonomous idle writes.
+      await until(() => evaluate(`document.readyState==='complete'`), 'motion fixture resources loaded');
+      await evaluate(`(async()=>{await document.fonts.ready;await Promise.all([...document.querySelectorAll('.pl-root img')].map(i=>i.decode()));
+        await new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)));})()`);
     };
     const clean = () => { assert.deepEqual(errors, []); assert.deepEqual(cdp.errors, []); };
 
@@ -306,15 +420,15 @@ test('interaction continuity regressions', { timeout: 150000 }, async (t) => {
   const modulePath = [...html.matchAll(/component-url="([^"]+)"/g)].map(m => m[1])
     .find(path => /FormationPolaroid\./.test(path));
   assert.ok(modulePath, 'actual built formation entry identified');
-  const hosted = await staticServer();
-  const profile = await mkdtemp(join(temporary, 'chiledao-continuity-profile-'));
-  const browser = spawn(browserPath, [
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-continuity-profile-')),
+    startBrowser: profile => spawn(browserPath, [
     '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
-  ], { stdio: 'ignore', windowsHide: true });
-  let cdp, injection, gate = false, pendingEntry, errors = [];
+  ], { stdio: 'ignore', windowsHide: true }) });
+  let cdp, injection, gate = false, pendingEntry, errors = [], primaryError;
   try {
     const port = await until(async () => {
       try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
@@ -461,10 +575,10 @@ test('interaction continuity regressions', { timeout: 150000 }, async (t) => {
           .getBoundingClientRect().left-r.getBoundingClientRect().left)<1;})()`), 'native gallery remains navigable'); clean();
       }
     });
-  } finally {
-    if (cdp) { try { await cdp.send('Browser.close'); } catch {} cdp.close(); }
-    if (browser.exitCode === null) browser.kill();
-    hosted.server.closeAllConnections(); await new Promise(done => hosted.server.close(done));
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp, server: hosted.server, primaryError,
+      report: result => t.diagnostic(`Owned cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}`) });
   }
 });
 
@@ -475,15 +589,15 @@ test('polaroid gesture ownership and hydration sizing', { timeout: 150000 }, asy
   const modulePath = [...html.matchAll(/component-url="([^"]+)"/g)].map(m => m[1])
     .find(path => /FormationPolaroid\./.test(path));
   assert.ok(modulePath, 'exact built formation entry identified');
-  const hosted = await staticServer();
-  const profile = await mkdtemp(join(temporary, 'chiledao-polaroid-profile-'));
-  const browser = spawn(browserPath, [
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-polaroid-profile-')),
+    startBrowser: profile => spawn(browserPath, [
     '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
-  ], { stdio: 'ignore', windowsHide: true });
-  let cdp, injection, gate = false, pendingEntry, receipts = [], errors = [];
+  ], { stdio: 'ignore', windowsHide: true }) });
+  let cdp, injection, gate = false, pendingEntry, receipts = [], errors = [], primaryError;
   try {
     const port = await until(async () => {
       try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
@@ -704,25 +818,25 @@ test('polaroid gesture ownership and hydration sizing', { timeout: 150000 }, asy
       await until(async () => await evaluate('scrollY')>y+30, 'vertical native page pan inside formation');
       assert.equal((await pose()).offset, 0); assert.deepEqual(await listeners(), baseline); clean();
     });
-  } finally {
-    if (cdp) { try { await cdp.send('Browser.close'); } catch {} cdp.close(); }
-    if (browser.exitCode === null) browser.kill();
-    hosted.server.closeAllConnections(); await new Promise(done => hosted.server.close(done));
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp, server: hosted.server, primaryError,
+      report: result => t.diagnostic(`Owned cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}`) });
   }
 });
 
 test('works wheel zoom and archive keyboard navigation', { timeout: 150000 }, async (t) => {
   await access(temporary);
   await access(browserPath);
-  const hosted = await staticServer();
-  const profile = await mkdtemp(join(temporary, 'chiledao-wheel-keyboard-profile-'));
-  const browser = spawn(browserPath, [
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-wheel-keyboard-profile-')),
+    startBrowser: profile => spawn(browserPath, [
     '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
-  ], { stdio: 'ignore', windowsHide: true });
-  let cdp, injection, errors = [];
+  ], { stdio: 'ignore', windowsHide: true }) });
+  let cdp, injection, errors = [], primaryError;
   try {
     const port = await until(async () => {
       try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
@@ -866,25 +980,25 @@ test('works wheel zoom and archive keyboard navigation', { timeout: 150000 }, as
       }
       await key('Enter'); await until(async () => await url() === href, 'unmeasured native anchor Enter navigation'); clean();
     });
-  } finally {
-    if (cdp) { try { await cdp.send('Browser.close'); } catch {} cdp.close(); }
-    if (browser.exitCode === null) browser.kill();
-    hosted.server.closeAllConnections(); await new Promise(done => hosted.server.close(done));
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp, server: hosted.server, primaryError,
+      report: result => t.diagnostic(`Owned cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}`) });
   }
 });
 
 test('archive semantics and keyboard ownership', { timeout: 150000 }, async (t) => {
   await access(temporary);
   await access(browserPath);
-  const hosted = await staticServer();
-  const profile = await mkdtemp(join(temporary, 'chiledao-archive-semantics-profile-'));
-  const browser = spawn(browserPath, [
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-archive-semantics-profile-')),
+    startBrowser: profile => spawn(browserPath, [
     '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
-  ], { stdio: 'ignore', windowsHide: true });
-  let cdp, errors = [];
+  ], { stdio: 'ignore', windowsHide: true }) });
+  let cdp, errors = [], primaryError;
   try {
     const port = await until(async () => {
       try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
@@ -1001,10 +1115,10 @@ test('archive semantics and keyboard ownership', { timeout: 150000 }, async (t) 
         clean();
       });
     }
-  } finally {
-    if (cdp) { try { await cdp.send('Browser.close'); } catch {} cdp.close(); }
-    if (browser.exitCode === null) browser.kill();
-    hosted.server.closeAllConnections(); await new Promise(done => hosted.server.close(done));
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp, server: hosted.server, primaryError,
+      report: result => t.diagnostic(`Owned cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}`) });
   }
 });
 
@@ -1015,15 +1129,15 @@ test('archive native input and hydration focus', { timeout: 150000 }, async (t) 
   const modulePath = [...html.matchAll(/component-url="([^"]+)"/g)].map(m => m[1])
     .find(path => /WorksWheelShowcase\./.test(path));
   assert.ok(modulePath, 'actual hero entry identified');
-  const hosted = await staticServer();
-  const profile = await mkdtemp(join(temporary, 'chiledao-native-input-profile-'));
-  const browser = spawn(browserPath, [
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-native-input-profile-')),
+    startBrowser: profile => spawn(browserPath, [
     '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
-  ], { stdio: 'ignore', windowsHide: true });
-  let cdp, browserCdp, gate = false, pendingEntry, errors = [];
+  ], { stdio: 'ignore', windowsHide: true }) });
+  let cdp, browserCdp, gate = false, pendingEntry, errors = [], primaryError;
   try {
     const port = await until(async () => {
       try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
@@ -1172,26 +1286,25 @@ test('archive native input and hydration focus', { timeout: 150000 }, async (t) 
       await key('End'); await until(async () => await active() === 5, 'ordinary last photo');
       await key('Home'); await until(async () => await active() === 0, 'ordinary first photo'); clean();
     });
-  } finally {
-    if (browserCdp) browserCdp.close();
-    if (cdp) { try { await cdp.send('Browser.close'); } catch {} cdp.close(); }
-    if (browser.exitCode === null) browser.kill();
-    hosted.server.closeAllConnections(); await new Promise(done => hosted.server.close(done));
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp, connections: [browserCdp], server: hosted.server, primaryError,
+      report: result => t.diagnostic(`Owned cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}`) });
   }
 });
 
 test('works wheel input ownership', { timeout: 150000 }, async (t) => {
   await access(temporary);
   await access(browserPath);
-  const hosted = await staticServer();
-  const profile = await mkdtemp(join(temporary, 'chiledao-wheel-input-profile-'));
-  const browser = spawn(browserPath, [
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-wheel-input-profile-')),
+    startBrowser: profile => spawn(browserPath, [
     '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
-  ], { stdio: 'ignore', windowsHide: true });
-  let cdp, injection, errors = [];
+  ], { stdio: 'ignore', windowsHide: true }) });
+  let cdp, injection, errors = [], primaryError;
   try {
     const port = await until(async () => {
       try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
@@ -1443,10 +1556,10 @@ test('works wheel input ownership', { timeout: 150000 }, async (t) => {
       assert.deepEqual(await liveListeners(), listeners);
       clean();
     });
-  } finally {
-    if (cdp) { try { await cdp.send('Browser.close'); } catch {} cdp.close(); }
-    if (browser.exitCode === null) browser.kill();
-    hosted.server.closeAllConnections(); await new Promise(done => hosted.server.close(done));
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp, server: hosted.server, primaryError,
+      report: result => t.diagnostic(`Owned cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}`) });
   }
 });
 
@@ -1460,15 +1573,15 @@ test('observer ownership and reduced-motion drag', { timeout: 150000 }, async (t
     `http://localhost${timelinePath}`).pathname;
   const triggerModule = await readFile(join(root, triggerPath), 'utf8');
   const triggerSymbol = triggerModule.match(/([\w$]+) as ScrollTrigger\b/)[1];
-  const hosted = await staticServer();
-  const profile = await mkdtemp(join(temporary, 'chiledao-ownership-profile-'));
-  const browser = spawn(browserPath, [
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-ownership-profile-')),
+    startBrowser: profile => spawn(browserPath, [
     '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
-  ], { stdio: 'ignore', windowsHide: true });
-  let cdp, injection, instrument = false, errors = [], moduleReceipts = [];
+  ], { stdio: 'ignore', windowsHide: true }) });
+  let cdp, injection, instrument = false, errors = [], moduleReceipts = [], primaryError;
   try {
     const port = await until(async () => {
       try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
@@ -1700,10 +1813,10 @@ test('observer ownership and reduced-motion drag', { timeout: 150000 }, async (t
       assert.equal(await evaluate('window.__ownership.rows.filter(r=>!r.removed).length'), 3, 'reentry does not duplicate global callbacks');
       clean();
     });
-  } finally {
-    if (cdp) { try { await cdp.send('Browser.close'); } catch {} cdp.close(); }
-    if (browser.exitCode === null) browser.kill();
-    hosted.server.closeAllConnections(); await new Promise(done => hosted.server.close(done));
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp, server: hosted.server, primaryError,
+      report: result => t.diagnostic(`Owned cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}`) });
   }
 });
 
@@ -1714,15 +1827,15 @@ test('progressive enhancement capability fallbacks', { timeout: 150000 }, async 
   const siblingModules = [...html.matchAll(/<astro-island\b[^>]*component-url="([^"]+)"[^>]*>/g)]
     .map(match => match[1]).filter(url => /WorksWheelShowcase|timeline/.test(url));
   assert.equal(siblingModules.length, 2, 'exact sibling island modules identified for observer isolation');
-  const hosted = await staticServer();
-  const profile = await mkdtemp(join(temporary, 'chiledao-capability-profile-'));
-  const browser = spawn(browserPath, [
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-capability-profile-')),
+    startBrowser: profile => spawn(browserPath, [
     '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
-  ], { stdio: 'ignore', windowsHide: true });
-  let cdp, injection, isolate = false;
+  ], { stdio: 'ignore', windowsHide: true }) });
+  let cdp, injection, isolate = false, primaryError;
   let errors = [], faults = [], modalReads = [];
   try {
     const port = await until(async () => {
@@ -1968,25 +2081,25 @@ test('progressive enhancement capability fallbacks', { timeout: 150000 }, async 
         && document.activeElement===document.querySelector('[data-timeline-image]')`), 'Space modal close restores invoking focus');
       noUnexpectedErrors();
     });
-  } finally {
-    if (cdp) { try { await cdp.send('Browser.close'); } catch {} cdp.close(); }
-    if (browser.exitCode === null) browser.kill();
-    await new Promise(done => hosted.server.close(done));
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp, server: hosted.server, primaryError,
+      report: result => t.diagnostic(`Owned cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}`) });
   }
 });
 
 test('timeline mobile chronology is readable', { timeout: 90000 }, async (t) => {
   await access(temporary);
   await access(browserPath);
-  const hosted = await staticServer();
-  const profile = await mkdtemp(join(temporary, 'chiledao-timeline-readable-profile-'));
-  const browser = spawn(browserPath, [
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-timeline-readable-profile-')),
+    startBrowser: profile => spawn(browserPath, [
     '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
-  ], { stdio: 'ignore', windowsHide: true });
-  let cdp;
+  ], { stdio: 'ignore', windowsHide: true }) });
+  let cdp, primaryError;
   try {
     const port = await until(async () => {
       try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
@@ -2191,28 +2304,25 @@ test('timeline mobile chronology is readable', { timeout: 90000 }, async (t) => 
     t.diagnostic('No-JS chronology: script execution disabled before reload; every existing readability assertion passed');
     await cdp.send('Emulation.setScriptExecutionDisabled', { value: false });
     assert.deepEqual(cdp.errors, []);
-  } finally {
-    if (cdp) await cdp.send('Browser.close').catch(() => {});
-    cdp?.close();
-    if (browser.exitCode === null) await until(() => browser.exitCode !== null, 'owned readability browser exit').catch(() => browser.kill());
-    hosted.server.closeAllConnections();
-    await new Promise(done => hosted.server.close(done));
-    t.diagnostic(`Owned readability browser exited=${browser.exitCode !== null}; server closed; profile retained: ${profile}`);
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp, server: hosted.server, primaryError,
+      report: result => t.diagnostic(`Owned readability cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}; profile retained=${profile}`) });
   }
 });
 
 test('timeline points grow and glow when the line reaches them', { timeout: 90000 }, async (t) => {
   await access(temporary);
   await access(browserPath);
-  const hosted = await staticServer();
-  const profile = await mkdtemp(join(temporary, 'chiledao-timeline-glow-profile-'));
-  const browser = spawn(browserPath, [
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-timeline-glow-profile-')),
+    startBrowser: profile => spawn(browserPath, [
     '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
-  ], { stdio: 'ignore', windowsHide: true });
-  let cdp;
+  ], { stdio: 'ignore', windowsHide: true }) });
+  let cdp, primaryError;
   let snapshot;
   const errors = [];
   try {
@@ -2360,32 +2470,30 @@ test('timeline points grow and glow when the line reaches them', { timeout: 9000
     assert.equal((await snapshot()).triggers, 1, 'short vertical reentry creates no duplicate triggers');
     assert.deepEqual(errors, []);
     assert.deepEqual(cdp.errors, []);
-  } catch (error) {
-    if (snapshot) t.diagnostic(`Failure-time timeline: ${JSON.stringify(await snapshot().catch(e=>({error:e.message})))}`);
-    t.diagnostic(`Browser exceptions: ${JSON.stringify(errors)}; CDP errors: ${JSON.stringify(cdp?.errors??[])}`);
-    throw error;
-  } finally {
-    if (cdp) await cdp.send('Browser.close').catch(() => {});
-    cdp?.close();
-    if (browser.exitCode===null) await until(()=>browser.exitCode!==null, 'owned timeline browser exit').catch(()=>browser.kill());
-    hosted.server.closeAllConnections();
-    await new Promise(done=>hosted.server.close(done));
-    t.diagnostic(`Owned timeline browser exited=${browser.exitCode!==null}; server closed; profile retained: ${profile}`);
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp, server: hosted.server, primaryError,
+      diagnostics: async () => {
+        if (!primaryError) return;
+        if (snapshot) t.diagnostic(`Failure-time timeline: ${JSON.stringify(await snapshot().catch(e=>({error:e.message})))}`);
+        t.diagnostic(`Browser exceptions: ${JSON.stringify(errors)}; CDP errors: ${JSON.stringify(cdp?.errors??[])}`);
+      },
+      report: result => t.diagnostic(`Owned timeline cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}; profile retained=${profile}`) });
   }
 });
 
 test('landing particle background remains global and respects motion controls', { timeout: 180000 }, async (t) => {
   await access(temporary);
   await access(browserPath);
-  const hosted = await staticServer();
-  const profile = await mkdtemp(join(temporary, 'chiledao-global-wave-profile-'));
-  const browser = spawn(browserPath, [
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-global-wave-profile-')),
+    startBrowser: profile => spawn(browserPath, [
     '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
-  ], { stdio: 'ignore', windowsHide: true });
-  let cdp, controller, snapshot;
+  ], { stdio: 'ignore', windowsHide: true }) });
+  let cdp, controller, snapshot, primaryError;
   const errors = [];
   try {
     const port = await until(async () => {
@@ -2822,32 +2930,30 @@ test('landing particle background remains global and respects motion controls', 
     assert.equal((await snapshot()).canvases, 1);
     assert.deepEqual(errors, []);
     assert.deepEqual(cdp.errors, []);
-  } catch (error) {
-    if (snapshot) t.diagnostic(`Failure-time global wave: ${JSON.stringify(await snapshot().catch(e=>({error:e.message})))}`);
-    t.diagnostic(`Browser exceptions: ${JSON.stringify(errors)}; CDP errors: ${JSON.stringify(cdp?.errors??[])}`);
-    throw error;
-  } finally {
-    if (controller) { await controller.send('Browser.close').catch(() => {}); controller.close(); }
-    cdp?.close();
-    if (browser.exitCode === null) await until(() => browser.exitCode !== null, 'owned global wave browser exit').catch(() => browser.kill());
-    hosted.server.closeAllConnections();
-    await new Promise(done => hosted.server.close(done));
-    t.diagnostic(`Owned global wave browser exited=${browser.exitCode!==null}; server closed; profile retained: ${profile}`);
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp: controller ?? cdp, connections: [cdp], server: hosted.server, primaryError,
+      diagnostics: async () => {
+        if (!primaryError) return;
+        if (snapshot) t.diagnostic(`Failure-time global wave: ${JSON.stringify(await snapshot().catch(e=>({error:e.message})))}`);
+        t.diagnostic(`Browser exceptions: ${JSON.stringify(errors)}; CDP errors: ${JSON.stringify(cdp?.errors??[])}`);
+      },
+      report: result => t.diagnostic(`Owned global wave cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}; profile retained=${profile}`) });
   }
 });
 
 test('hero continuous particle wave', { timeout: 90000 }, async (t) => {
   await access(temporary);
   await access(browserPath);
-  const hosted = await staticServer();
-  const profile = await mkdtemp(join(temporary, 'chiledao-wave-profile-'));
-  const browser = spawn(browserPath, [
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-wave-profile-')),
+    startBrowser: profile => spawn(browserPath, [
     '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
-  ], { stdio: 'ignore', windowsHide: true });
-  let cdp;
+  ], { stdio: 'ignore', windowsHide: true }) });
+  let cdp, primaryError;
   let controller;
   try {
     const port = await until(async () => {
@@ -3143,12 +3249,10 @@ test('hero continuous particle wave', { timeout: 90000 }, async (t) => {
     await delay(500);
     assert.equal(await evaluate(`document.querySelector('[data-wave-toggle]').hidden && !document.querySelector('[data-particle-wave]').dataset.wavePaints`), true, 'unsupported canvas safe fallback');
     assert.deepEqual(cdp.errors, []);
-  } finally {
-    if (controller) { await controller.send('Browser.close').catch(() => {}); controller.close(); }
-    cdp?.close();
-    if (browser.exitCode === null) await until(() => browser.exitCode !== null, 'owned wave Chrome closed').catch(() => browser.kill());
-    await new Promise(done => hosted.server.close(done));
-    t.diagnostic(`Owned profile retained: ${profile}`);
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp: controller ?? cdp, connections: [cdp], server: hosted.server, primaryError,
+      report: result => t.diagnostic(`Owned wave cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}; profile retained=${profile}`) });
   }
 });
 
@@ -3176,15 +3280,15 @@ const nativeWheelReceiptSource = name => `(() => {
 test('native wheel capture interrupts entrance independently of gallery resize', { timeout: 60000 }, async (t) => {
   await access(temporary);
   await access(browserPath);
-  const hosted = await staticServer();
-  const profile = await mkdtemp(join(temporary, 'chiledao-capture-profile-'));
-  const browser = spawn(browserPath, [
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-capture-profile-')),
+    startBrowser: profile => spawn(browserPath, [
     '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
-  ], { stdio: 'ignore', windowsHide: true });
-  let cdp;
+  ], { stdio: 'ignore', windowsHide: true }) });
+  let cdp, primaryError;
   const errors = [];
   try {
     const port = await until(async () => {
@@ -3310,43 +3414,41 @@ test('native wheel capture interrupts entrance independently of gallery resize',
     assert.deepEqual(errors, []);
     assert.deepEqual(cdp.errors, []);
     t.diagnostic(`independent native capture: distance=${distance}, threshold=${threshold}; absent CSS controls, native card selection, eight keyboard selections, ArrowUp/Home/End, complete entrance and both no-idle endpoints passed`);
-  } catch (error) {
-    if (cdp) {
-      try {
-        const snapshot = await cdp.send('Runtime.evaluate', {
-          expression: `({events:window.__captureReceipt??[],epoch:performance.timeOrigin,ownerStable:document.querySelector('[data-works-stage]')===window.__endpointOwner,stage:document.querySelector('[data-works-stage]')?.dataset,entrance:document.querySelector('[data-works-showcase]')?.dataset,hidden:document.hidden,focus:document.hasFocus()})`, returnByValue: true,
-        });
-        const { events, ...state } = snapshot.result?.value??{};
-        t.diagnostic(`Failure-time independent state: ${JSON.stringify(state)}`);
-        for (const event of events??[]) t.diagnostic(`Failure-time independent pointer: ${JSON.stringify(event)}`);
-        if (snapshot.exceptionDetails) t.diagnostic(`Pointer receipt diagnostic exception: ${JSON.stringify(snapshot.exceptionDetails)}`);
-      } catch (diagnosticError) {
-        t.diagnostic(`Pointer receipt diagnostics unavailable: ${diagnosticError.message}`);
-      }
-    } else t.diagnostic('Pointer receipt diagnostics unavailable: browser connection was not established');
-    throw error;
-  } finally {
-    if (cdp) await cdp.send('Browser.close').catch(() => {});
-    cdp?.close();
-    if (browser.exitCode === null) await until(() => browser.exitCode !== null, 'owned capture browser exit').catch(() => browser.kill());
-    hosted.server.closeAllConnections();
-    await new Promise(done => hosted.server.close(done));
-    t.diagnostic(`Owned capture browser exited=${browser.exitCode !== null}; server closed; profile retained: ${profile}`);
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp, server: hosted.server, primaryError,
+      diagnostics: async () => {
+        if (!primaryError) return;
+        if (cdp) {
+          try {
+            const snapshot = await cdp.send('Runtime.evaluate', {
+              expression: `({events:window.__captureReceipt??[],epoch:performance.timeOrigin,ownerStable:document.querySelector('[data-works-stage]')===window.__endpointOwner,stage:document.querySelector('[data-works-stage]')?.dataset,entrance:document.querySelector('[data-works-showcase]')?.dataset,hidden:document.hidden,focus:document.hasFocus()})`, returnByValue: true,
+            });
+            const { events, ...state } = snapshot.result?.value??{};
+            t.diagnostic(`Failure-time independent state: ${JSON.stringify(state)}`);
+            for (const event of events??[]) t.diagnostic(`Failure-time independent pointer: ${JSON.stringify(event)}`);
+            if (snapshot.exceptionDetails) t.diagnostic(`Pointer receipt diagnostic exception: ${JSON.stringify(snapshot.exceptionDetails)}`);
+          } catch (diagnosticError) {
+            t.diagnostic(`Pointer receipt diagnostics unavailable: ${diagnosticError.message}`);
+          }
+        } else t.diagnostic('Pointer receipt diagnostics unavailable: browser connection was not established');
+      },
+      report: result => t.diagnostic(`Owned capture cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}; profile retained=${profile}`) });
   }
 });
 
 test('hero community CTA and timeline actions absence', { timeout: 60000 }, async (t) => {
   await access(temporary);
   await access(browserPath);
-  const hosted = await staticServer();
-  const profile = await mkdtemp(join(temporary, 'chiledao-actions-profile-'));
-  const browser = spawn(browserPath, [
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-actions-profile-')),
+    startBrowser: profile => spawn(browserPath, [
     '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
-  ], { stdio: 'ignore', windowsHide: true });
-  let cdp;
+  ], { stdio: 'ignore', windowsHide: true }) });
+  let cdp, primaryError;
   let controller;
   const blocked = [];
   try {
@@ -3450,26 +3552,24 @@ test('hero community CTA and timeline actions absence', { timeout: 60000 }, asyn
     assert.deepEqual(controller.errors, []);
     assert.ok(blocked.includes('https://linktr.ee/web3chile'));
     t.diagnostic('Hydrated DOM, exact blocked popup, reduced static and short-landscape enhanced vertical chronology/modal passed; seven milestones per fixture; no external destination fetched.');
-  } finally {
-    if (controller) { await controller.send('Browser.close').catch(() => {}); controller.close(); }
-    cdp?.close();
-    if (browser.exitCode === null) await until(() => browser.exitCode !== null, 'owned actions Chrome closed').catch(() => browser.kill());
-    await new Promise(done => hosted.server.close(done));
-    t.diagnostic(`Owned profile retained: ${profile}`);
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp: controller ?? cdp, connections: [cdp], server: hosted.server, primaryError,
+      report: result => t.diagnostic(`Owned actions cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}; profile retained=${profile}`) });
   }
 });
 
 test('hero decoded image fade entrance', { timeout: 120000 }, async (t) => {
   await access(temporary);
   await access(browserPath);
-  const hosted = await staticServer();
-  const profile = await mkdtemp(join(temporary, 'chiledao-fade-profile-'));
-  const browser = spawn(browserPath, [
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-fade-profile-')),
+    startBrowser: profile => spawn(browserPath, [
     '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
-  ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+  ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true }) });
   let cdp;
   let brokenImage = false;
   let drain;
@@ -3710,14 +3810,14 @@ test('hero decoded image fade entrance', { timeout: 120000 }, async (t) => {
 test('timeline modal declaration ownership', { timeout: 90000 }, async (t) => {
   await access(temporary);
   await access(browserPath);
-  const hosted = await staticServer();
-  const profile = await mkdtemp(join(temporary, 'chiledao-declarations-profile-'));
-  const browser = spawn(browserPath, [
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-declarations-profile-')),
+    startBrowser: profile => spawn(browserPath, [
     '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
-  ], { stdio: 'ignore', windowsHide: true });
+  ], { stdio: 'ignore', windowsHide: true }) });
   let cdp;
   let evaluate;
   let ownershipPassed = false;
@@ -3906,14 +4006,14 @@ test('timeline modal declaration ownership', { timeout: 90000 }, async (t) => {
 test('hero hard-refresh firstpaint', { timeout: 120000 }, async (t) => {
   await access(temporary);
   await access(browserPath);
-  const hosted = await staticServer();
-  const profile = await mkdtemp(join(temporary, 'chiledao-loading-profile-'));
-  const browser = spawn(browserPath, [
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-loading-profile-')),
+    startBrowser: profile => spawn(browserPath, [
     '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
     `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
     '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
-  ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true });
+  ], { stdio: ['ignore', 'ignore', 'pipe'], windowsHide: true }) });
   let cdp;
   let hold = true;
   let abort = false;
@@ -4156,6 +4256,7 @@ test('real browser verifies supplied works wheel, synchronized details and progr
   let profile;
   let cdp;
   let browserClosed = false;
+  let primaryError;
   const screenshots = [];
   const requests = { local: 0, blocked: [] };
   let failScripts = false;
@@ -5411,31 +5512,22 @@ test('real browser verifies supplied works wheel, synchronized details and progr
     t.diagnostic('no-JS and failed-JS: same ring with eight decoded archive artwork links and readable intro, no inert listbox; formation native keyboard scrolling retained without JS. Mobile wheel horizontal touch, vertical page travel and reduced motion passed.');
     t.diagnostic(`request isolation: ${requests.local} permitted local/data/blob requests; ${requests.blocked.length} external requests intercepted and aborted before network: ${requests.blocked.join(', ')}`);
     for (const path of screenshots) t.diagnostic(`screenshot: ${path}`);
-  } catch (error) {
-    if (cdp) {
-      try {
-        const snapshot = await cdp.send('Runtime.evaluate', { returnByValue: true, expression: `({epoch:window.__lateHero?.id,events:window.__pointerReceipt??[],stage:document.querySelector('[data-works-stage]')?.dataset,entrance:document.querySelector('[data-works-showcase]')?.dataset,photos:[...document.querySelectorAll('[data-hero-photo]')].map(e=>({ready:e.dataset.photoReady,connected:e.isConnected,opacity:getComputedStyle(e).opacity,transform:getComputedStyle(e).transform,decoded:e.querySelector('img').complete&&e.querySelector('img').naturalWidth>0,effects:e.getAnimations().map(a=>({state:a.playState,time:a.currentTime,duration:a.effect.getTiming().duration}))})),hidden:document.hidden,focus:document.hasFocus()})` });
-        const frame = (await cdp.send('Page.getFrameTree')).frameTree.frame;
-        const { events, ...state } = snapshot.result?.value??{};
-        t.diagnostic(`Failure-time main journey state: ${JSON.stringify({navigation:navigationReceipt,frame:{id:frame.id,loader:frame.loaderId},state,faults:entranceFaults.map(fault=>({...fault,...scriptRequests.get(fault.networkId)}))})}`);
-        for (const event of events??[]) t.diagnostic(`Failure-time main pointer: ${JSON.stringify(event)}`);
-      } catch (diagnosticError) { t.diagnostic(`Main journey diagnostics unavailable: ${diagnosticError.message}`); }
-    }
-    throw error;
-  } finally {
-    if (browser && !browserClosed) {
-      if (cdp) await cdp.send('Browser.close').catch(() => {});
-      try { await until(() => browserClosed, 'owned browser exit', 5000); }
-      catch {
-        browser.kill();
-        await until(() => browserClosed, 'owned child exit after kill', 5000);
-      }
-    }
-    cdp?.close();
-    if (server) {
-      server.closeAllConnections();
-      await new Promise((done) => server.close(done));
-    }
-    t.diagnostic(`cleanup: owned browser exited=${browserClosed}; server closed=${Boolean(server && !server.listening)}; fresh profile retained=${profile}; screenshots retained outside profile`);
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp, server, primaryError, graceMs: 5000, exitMs: 5000,
+      diagnostics: async () => {
+        if (!primaryError) return;
+        if (cdp) {
+          try {
+            const snapshot = await cdp.send('Runtime.evaluate', { returnByValue: true, expression: `({epoch:window.__lateHero?.id,events:window.__pointerReceipt??[],stage:document.querySelector('[data-works-stage]')?.dataset,entrance:document.querySelector('[data-works-showcase]')?.dataset,photos:[...document.querySelectorAll('[data-hero-photo]')].map(e=>({ready:e.dataset.photoReady,connected:e.isConnected,opacity:getComputedStyle(e).opacity,transform:getComputedStyle(e).transform,decoded:e.querySelector('img').complete&&e.querySelector('img').naturalWidth>0,effects:e.getAnimations().map(a=>({state:a.playState,time:a.currentTime,duration:a.effect.getTiming().duration}))})),hidden:document.hidden,focus:document.hasFocus()})` });
+            const frame = (await cdp.send('Page.getFrameTree')).frameTree.frame;
+            const { events, ...state } = snapshot.result?.value??{};
+            t.diagnostic(`Failure-time main journey state: ${JSON.stringify({navigation:navigationReceipt,frame:{id:frame.id,loader:frame.loaderId},state,faults:entranceFaults.map(fault=>({...fault,...scriptRequests.get(fault.networkId)}))})}`);
+            for (const event of events??[]) t.diagnostic(`Failure-time main pointer: ${JSON.stringify(event)}`);
+          } catch (diagnosticError) { t.diagnostic(`Main journey diagnostics unavailable: ${diagnosticError.message}`); }
+        }
+      },
+      report: result => t.diagnostic(`cleanup: owned browser exited=${result.exited}; server closed=${Boolean(server && !server.listening)}; errors=${result.errors.map(e => e.message).join('; ')}; fresh profile retained=${profile}; screenshots retained outside profile`),
+    });
   }
 });

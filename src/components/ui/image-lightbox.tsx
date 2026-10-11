@@ -80,13 +80,13 @@ export default function ImageLightbox({ image, invoker, onClose }: {
       if (event.clientX < r.left || event.clientX > r.right || event.clientY < r.top || event.clientY > r.bottom) onClose();
     }}>
     <style>{`
-      [data-image-lightbox] { border:1px solid #f8f6ee66; border-radius:12px; padding:16px; margin:auto; width:min(1100px,calc(100vw - 32px)); max-width:calc(100vw - 32px); max-height:calc(100dvh - 32px); color:#f8f6ee; background:#0e1320; overflow:auto; }
+      [data-image-lightbox] { border:1px solid #f8f6ee66; border-radius:12px; padding:16px; margin:auto; width:min(1100px,calc(100vw - 32px)); max-width:calc(100vw - 32px); max-height:calc(100dvh - 32px); color:var(--white); background:#0e1320; overflow:auto; }
       [data-image-lightbox]::backdrop { background:#000b; }
       [data-image-lightbox] figure { margin:0; }
       [data-image-lightbox] img { display:block; width:100%; height:min(70dvh,760px); object-fit:contain; }
       [data-image-lightbox] figcaption { margin-top:12px; font-size:16px; line-height:1.4; }
       [data-image-lightbox] button { display:block; min-width:44px; min-height:44px; margin-left:auto; padding:8px 12px; border:1px solid #f8f6ee88; border-radius:6px; }
-      [data-image-lightbox] button:focus-visible { outline:2px solid #f8f6ee; outline-offset:2px; }
+      [data-image-lightbox] button:focus-visible { outline:2px solid var(--white); outline-offset:2px; }
       @media(max-width:599px) { [data-image-lightbox] { padding:12px; } [data-image-lightbox] img { height:58dvh; } }
     `}</style>
     <button type="button" autoFocus onClick={onClose} aria-label="Cerrar imagen">Cerrar ×</button>

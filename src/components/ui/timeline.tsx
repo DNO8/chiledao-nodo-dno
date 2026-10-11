@@ -314,7 +314,7 @@ export default function Timeline({ items }: { items: TimelineItem[] }) {
 }
 
 const styles = `
-.chile-timeline { --timeline-header: 65px; color: #f8f6ee; background: var(--color-navy, #0e1320); }
+.chile-timeline { --timeline-header: 65px; color: var(--white); background: var(--color-navy, #0e1320); }
 .timeline-canvas { padding: 24px; }
 .timeline-heading { display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap; margin-bottom: 24px; }
 .timeline-heading h2 { font-size: clamp(24px,3vw,40px); font-weight: 700; line-height: 1.15; }
@@ -328,9 +328,9 @@ const styles = `
 .milestone img { display: block; height: 100%; width: 100%; object-fit: contain; }
 .milestone .media-label { font-size: 12px; }
 [data-timeline-image] { display:block; border-radius:8px; }
-[data-timeline-image]:focus-visible { outline:2px solid #f8f6ee; outline-offset:3px; }
+[data-timeline-image]:focus-visible { outline:2px solid var(--white); outline-offset:3px; }
 .milestone-stem, .milestone-dot, .journey-line { display: none; }
-.future-mark { font-size: 72px; color: #f31e32; }
+.future-mark { font-size: 72px; color: var(--red); }
 [data-enhanced] .milestone-dot[data-reached] { transform: scale(1.75); transform-origin: center; box-shadow: 0 0 6px 2px #c8172a99, 0 0 16px 4px #f31e3240; }
 @media (min-width: 1024px) {
 .chile-timeline[data-enhanced] { height: max(200vw, 2400px); }
@@ -362,7 +362,7 @@ const styles = `
      rail remains visible while the separate progress line has scaleY zero. */
   .timeline-track::before { content: ''; position: absolute; left: 0; top: 0; bottom: 0; width: 1px; background: #c8172a; pointer-events: none; }
   .milestone-dot { display: block; position: absolute; left: -4.5px; top: 10px; width: 10px; height: 10px; border-radius: 50%; background: #c8172a; }
-  .journey-line { display: block; position: absolute; left: 0; top: 0; bottom: 0; width: 1px; background: #f31e32; transform-origin: top; pointer-events: none; }
+  .journey-line { display: block; position: absolute; left: 0; top: 0; bottom: 0; width: 1px; background: var(--red); transform-origin: top; pointer-events: none; }
 }
 @media (prefers-reduced-motion: reduce) {
   .chile-timeline[data-enhanced] { height: auto; }
