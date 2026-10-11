@@ -584,9 +584,16 @@ test('hero archive paints eight real SSR ring frames with progressive artwork li
   assert.equal(all(hero, node => 'data-works-fallback' in node.attrs).length, 0, 'no vertical giant-poster replacement branch');
   const frames = all(hero, node => 'data-work-face' in node.attrs);
   assert.equal(frames.length, 8);
+  const stage = one(all(hero, node => 'data-works-stage' in node.attrs), 'SSR archive stage');
+  assert.equal(stage.attrs.role, 'group');
+  assert.equal(stage.attrs.tabindex, undefined, 'unmeasured stage does not replace native link focus');
+  assert.match(text(one(byId(stage.attrs['aria-describedby']), 'fallback archive instructions')), /Abre cada imagen/);
   for (const [index, frame] of frames.entries()) {
     assert.equal(byTag(frame, 'picture').length, 1);
     assert.ok(one(byTag(frame, 'a'), 'native artwork link').attrs.href.startsWith('/_astro/'));
+    assert.equal(one(byTag(frame, 'a'), 'focusable SSR artwork link').attrs.tabindex, '0');
+    assert.equal(one(byTag(frame, 'a'), 'same original image destination').attrs.href,
+      one(byTag(frame, 'img'), 'original image').attrs.src);
     assert.match(one(byTag(frame, 'img'), 'factual artwork').attrs.alt, /Afiche/);
     assert.equal(one(byTag(frame, 'img'), 'eager artwork').attrs.loading, 'eager');
     assert.equal(one(byTag(frame, 'img'), 'priority').attrs.fetchpriority, index === 0 ? 'high' : 'auto');

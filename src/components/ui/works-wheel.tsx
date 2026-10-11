@@ -269,6 +269,8 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
     const el = stageRef.current;
     if (!el || !ready) return;
     const onWheel = (event: WheelEvent) => {
+      // Ctrl+wheel also represents trackpad pinch; leave browser zoom native.
+      if (event.ctrlKey) return;
       // Release outward movement at both boundaries to native page scrolling.
       if ((target.current === 0 && event.deltaY <= 0)
         || (target.current === last + 1 && event.deltaY >= 0)) return;
@@ -347,7 +349,15 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
             if (event.target === event.currentTarget) endDrag(event.pointerId);
           }}
           onKeyDown={event => {
-            if (!ready) return;
+            if (!ready || event.target !== event.currentTarget || event.defaultPrevented
+              || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey || event.repeat) return;
+            if (event.key === "Enter" || event.key === " ") {
+              const image = items[active]?.image;
+              if (!image) return;
+              event.preventDefault();
+              window.location.assign(image);
+              return;
+            }
             if (event.key === "ArrowDown") select(Math.round(target.current) + 1);
             else if (event.key === "ArrowUp") select(Math.round(target.current) - 1);
             else if (event.key === "Home") select(0);
@@ -392,7 +402,7 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
           className="sr-only"
           style={{ fontSize: metrics.title }}>{items[active]?.title}</div>
       </div>
-      <p className="sr-only" id={instructionsId}>{ready ? 'Usa ↑ y ↓ o gira con la rueda del ratón. Arrastra verticalmente con ratón u horizontalmente en pantalla táctil. Inicio vuelve al círculo; Fin muestra el último afiche.' : 'Afiches de archivo; no son convocatorias vigentes. Abre cada imagen para consultar el afiche completo.'}</p>
+      <p className="sr-only" id={instructionsId}>{ready ? 'Usa ↑ y ↓ o gira con la rueda del ratón. Arrastra verticalmente con ratón u horizontalmente en pantalla táctil. Inicio vuelve al círculo; Fin muestra el último afiche. Pulsa Enter o la barra espaciadora para abrir el afiche seleccionado.' : 'Afiches de archivo; no son convocatorias vigentes. Abre cada imagen para consultar el afiche completo.'}</p>
       {showControls && <div ref={controlsRef} className="relative z-10 flex flex-col items-center p-1 text-center text-sm">
         <ol className="text-muted-foreground flex flex-wrap justify-center w-[352px] max-w-full max-[359px]:w-44 text-center leading-[1.75]"
           style={{ fontSize: metrics.index }} aria-label="Elegir actividad">

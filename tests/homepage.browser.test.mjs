@@ -349,6 +349,168 @@ test('polaroid gesture ownership and hydration sizing', { timeout: 150000 }, asy
   }
 });
 
+test('works wheel zoom and archive keyboard navigation', { timeout: 150000 }, async (t) => {
+  await access(temporary);
+  await access(browserPath);
+  const hosted = await staticServer();
+  const profile = await mkdtemp(join(temporary, 'chiledao-wheel-keyboard-profile-'));
+  const browser = spawn(browserPath, [
+    '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+    `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
+    '--disable-background-networking', '--disable-component-update', '--disable-sync',
+    '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
+  ], { stdio: 'ignore', windowsHide: true });
+  let cdp, injection, errors = [];
+  try {
+    const port = await until(async () => {
+      try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
+      catch { return false; }
+    }, 'owned keyboard browser port', 15000);
+    const page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(p => p.type === 'page');
+    cdp = await connect(page.webSocketDebuggerUrl);
+    cdp.on('Fetch.requestPaused', async ({ requestId, request }) => {
+      const url = new URL(request.url);
+      const allowed = url.origin === hosted.origin || url.protocol === 'data:'
+        || (url.protocol === 'blob:' && request.url.startsWith(`blob:${hosted.origin}/`));
+      await cdp.send(allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest',
+        { requestId, ...(allowed ? {} : { errorReason: 'BlockedByClient' }) });
+    });
+    cdp.on('Runtime.exceptionThrown', ({ exceptionDetails }) => errors.push(exceptionDetails.exception?.description ?? exceptionDetails.text));
+    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+    await cdp.send('Page.enable'); await cdp.send('Runtime.enable');
+    await cdp.send('Network.enable'); await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
+    await cdp.send('Target.activateTarget', { targetId: page.id }); await cdp.send('Page.bringToFront');
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    const evaluate = async expression => {
+      const result = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+      assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails));
+      return result.result.value;
+    };
+    const reduce = value => cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value }] });
+    const load = async (motion = 'reduce', source = '') => {
+      await reduce(motion);
+      if (injection) await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: injection });
+      errors = [];
+      ({ identifier: injection } = await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+        ${source}
+        window.__keys=[];window.__wheels=[];
+        for(const type of ['wheel','keydown'])document.addEventListener(type,e=>{
+          const stage=e.target.closest?.('[data-works-stage]');
+          if(stage)(type==='wheel'?window.__wheels:window.__keys).push({trusted:e.isTrusted,
+            cancelled:e.defaultPrevented,key:e.key,ctrl:e.ctrlKey});
+        });
+      ` }));
+      await cdp.send('Page.navigate', { url: hosted.origin });
+      await until(() => evaluate(`document.readyState==='complete' && [...document.querySelectorAll('astro-island')]
+        .filter(i=>/WorksWheelShowcase/.test(i.getAttribute('component-url'))).every(i=>!i.hasAttribute('ssr'))
+        && !!document.querySelector('[data-works-stage]')`), 'real hero hydration');
+      if (!source) await until(() => evaluate(`Number(document.querySelector('[data-works-stage]').dataset.draws)>0`), 'measured stage');
+    };
+    const key = async (name, extra = {}) => {
+      const code = { ArrowDown: 40, ArrowUp: 38, Home: 36, End: 35, Enter: 13, ' ': 32, Escape: 27 }[name];
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: name, code: name === ' ' ? 'Space' : name,
+        windowsVirtualKeyCode: code, ...extra });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: name, windowsVirtualKeyCode: code });
+    };
+    const focus = () => evaluate(`document.querySelector('[data-works-stage]').focus({preventScroll:true})`);
+    const turn = () => evaluate(`Number(document.querySelector('[data-works-stage]').dataset.turn)`);
+    const settled = expected => until(async () => Math.abs(await turn()-expected)<.0005, `settled turn ${expected}`);
+    const url = async () => (await cdp.send('Page.getFrameTree')).frameTree.frame.url;
+    const clean = () => { assert.deepEqual(errors, []); assert.deepEqual(cdp.errors, []); };
+
+    await t.test('trusted Ctrl wheel is not cancelled or selected and normal wheel retains boundaries', async () => {
+      await load(); await focus(); await key('ArrowDown'); await key('ArrowDown'); await settled(2);
+      const point = await evaluate(`(()=>{const s=document.querySelector('[data-works-stage]'),r=s.getBoundingClientRect();
+        const p={x:r.left+r.width/2,y:r.top+r.height*.6};return {...p,hit:s.contains(document.elementFromPoint(p.x,p.y))};})()`);
+      assert.equal(point.hit, true);
+      const wheel = async (deltaY, modifiers = 0) => {
+        // Native zoom can resize the stage; hit-test current geometry each time.
+        const hit = await evaluate(`(()=>{const s=document.querySelector('[data-works-stage]'),r=s.getBoundingClientRect();
+          for(let y=Math.max(90,r.top+20);y<Math.min(innerHeight-20,r.bottom);y+=20)
+            for(let x=r.left+20;x<r.right-20;x+=20)
+              if(s.contains(document.elementFromPoint(x,y)))return {x,y};return null;})()`);
+        assert.ok(hit, 'wheel hits current stage geometry');
+        await cdp.send('Input.dispatchMouseEvent', {type:'mouseWheel',...hit,deltaX:0,deltaY,modifiers});
+      };
+      await wheel(900, 2); await delay(350);
+      assert.deepEqual(await evaluate('window.__wheels.at(-1)'), {trusted:true,cancelled:false,ctrl:true});
+      assert.equal(await turn(), 2, 'Ctrl wheel cannot change the selected pose');
+      assert.equal(await evaluate(`document.querySelector('[aria-selected="true"]').dataset.workCard`), '1');
+      await evaluate('scrollTo({top:0,behavior:"instant"})');
+      await wheel(900); await settled(3);
+      assert.equal(await evaluate('window.__wheels.at(-1).cancelled'), true);
+      await key('Home'); await settled(0);
+      await evaluate('scrollTo({top:100,behavior:"instant"})');
+      const y = await evaluate('scrollY'); await wheel(-160); await delay(300);
+      assert.equal(await evaluate('window.__wheels.at(-1).cancelled'), false);
+      assert.ok(await evaluate('scrollY') < y, 'outward ring wheel still scrolls the page');
+      await focus(); await key('End'); await settled(8);
+      const endY = await evaluate('scrollY'); await wheel(160); await delay(300);
+      assert.equal(await evaluate('window.__wheels.at(-1).cancelled'), false);
+      assert.ok(await evaluate('scrollY') > endY, 'outward last-card wheel still scrolls the page'); clean();
+    });
+
+    await t.test('stage Enter and Space navigate to actual selected media without optional controls', async (st) => {
+      for (const motion of ['reduce', 'no-preference', 'live']) for (const name of ['Enter', ' ']) {
+        await st.test(`${motion} ${name === ' ' ? 'Space' : name}`, async () => {
+          await load(motion === 'live' ? 'no-preference' : motion);
+          if (motion === 'live') { await reduce('reduce'); await delay(100); }
+          await focus(); await key('End'); await settled(8); await key('ArrowUp'); await settled(7);
+          await until(() => evaluate(`document.querySelector('[aria-selected="true"]').dataset.workCard==='6'`), 'selected React option committed');
+          const selected = await evaluate(`(()=>{const s=document.querySelector('[data-works-stage]');return {
+            href:s.querySelector('[aria-selected="true"] a').href,index:s.querySelector('[aria-selected="true"]').dataset.workCard,
+            instruction:document.getElementById(s.getAttribute('aria-describedby')).textContent,
+            controls:document.querySelectorAll('[data-work-index],[data-works-reset]').length,
+            focused:document.activeElement===s};})()`);
+          assert.equal(selected.index, '6'); assert.equal(selected.controls, 0); assert.equal(selected.focused, true);
+          assert.equal(new URL(selected.href).origin, hosted.origin); assert.match(new URL(selected.href).pathname, /^\/_astro\/.*\.webp$/);
+          await key(name);
+          await until(async () => await url() === selected.href, 'trusted stage key opens selected local image');
+          assert.equal(await evaluate(`document.querySelector('img')?.src`), selected.href, 'browser displays the image document'); clean();
+          assert.match(selected.instruction, /Enter.*barra espaciadora.*afiche seleccionado/);
+        });
+      }
+    });
+
+    await t.test('modified repeated cancelled and descendant keys retain ownership; fallback links stay native', async () => {
+      await load(); await focus(); await key('ArrowDown'); await key('ArrowDown'); await settled(2);
+      for (const name of ['Enter', ' ', 'ArrowDown', 'Home']) {
+        for (const modifiers of [1, 2, 4, 8]) {
+          await key(name, {modifiers}); await delay(50);
+          assert.equal(await evaluate('window.__keys.at(-1).cancelled'), false, `${name}/${modifiers} is unconsumed`);
+          assert.equal(await url(), hosted.origin+'/'); assert.equal(await turn(), 2);
+        }
+        await key(name, {autoRepeat:true}); await delay(50);
+        assert.equal(await evaluate('window.__keys.at(-1).cancelled'), false, `${name} repeat is unconsumed`);
+        assert.equal(await turn(), 2); assert.equal(await url(), hosted.origin+'/');
+      }
+      // Controlled cancellation probes supplement, rather than replace, trusted input.
+      const probes = await evaluate(`(()=>{const s=document.querySelector('[data-works-stage]');return ['Enter',' ','Home'].map(key=>{
+        const e=new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true});e.preventDefault();s.dispatchEvent(e);return e.defaultPrevented;});})()`);
+      assert.deepEqual(probes, [true,true,true]); await delay(100); assert.equal(await turn(), 2);
+      assert.equal(await url(), hosted.origin+'/', 'pre-cancelled activation cannot navigate');
+      await evaluate(`document.querySelector('[data-hero-photo]').focus({preventScroll:true})`);
+      await key('ArrowDown'); await delay(100);
+      assert.equal(await evaluate('window.__keys.at(-1).cancelled'), false); assert.equal(await turn(), 2);
+      await focus(); await key('Escape');
+      assert.equal(await evaluate('window.__keys.at(-1).cancelled'), false); clean();
+      await load('reduce', 'window.ResizeObserver=undefined;');
+      assert.equal(await evaluate(`document.querySelector('[data-works-stage]').getAttribute('role')`), 'group');
+      await evaluate(`document.querySelector('[data-hero-photo]').focus({preventScroll:true})`);
+      const href = await evaluate('document.activeElement.href');
+      for (const name of [' ', 'ArrowDown', 'Home']) {
+        await key(name); await delay(100);
+        assert.equal(await evaluate('window.__keys.at(-1).cancelled'), false);
+      }
+      await key('Enter'); await until(async () => await url() === href, 'unmeasured native anchor Enter navigation'); clean();
+    });
+  } finally {
+    if (cdp) { try { await cdp.send('Browser.close'); } catch {} cdp.close(); }
+    if (browser.exitCode === null) browser.kill();
+    hosted.server.closeAllConnections(); await new Promise(done => hosted.server.close(done));
+  }
+});
+
 test('works wheel input ownership', { timeout: 150000 }, async (t) => {
   await access(temporary);
   await access(browserPath);
