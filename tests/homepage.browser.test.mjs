@@ -106,6 +106,175 @@ async function connect(url) {
   };
 }
 
+test('interaction continuity regressions', { timeout: 150000 }, async (t) => {
+  await access(temporary);
+  await access(browserPath);
+  const html = await readFile(join(root, 'index.html'), 'utf8');
+  const modulePath = [...html.matchAll(/component-url="([^"]+)"/g)].map(m => m[1])
+    .find(path => /FormationPolaroid\./.test(path));
+  assert.ok(modulePath, 'actual built formation entry identified');
+  const hosted = await staticServer();
+  const profile = await mkdtemp(join(temporary, 'chiledao-continuity-profile-'));
+  const browser = spawn(browserPath, [
+    '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+    `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
+    '--disable-background-networking', '--disable-component-update', '--disable-sync',
+    '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
+  ], { stdio: 'ignore', windowsHide: true });
+  let cdp, injection, gate = false, pendingEntry, errors = [];
+  try {
+    const port = await until(async () => {
+      try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
+      catch { return false; }
+    }, 'owned continuity browser port', 15000);
+    const page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(p => p.type === 'page');
+    cdp = await connect(page.webSocketDebuggerUrl);
+    cdp.on('Fetch.requestPaused', async ({ requestId, request }) => {
+      const url = new URL(request.url);
+      if (gate && url.origin === hosted.origin && url.pathname === modulePath) {
+        pendingEntry = requestId; return;
+      }
+      const allowed = url.origin === hosted.origin || url.protocol === 'data:'
+        || (url.protocol === 'blob:' && request.url.startsWith(`blob:${hosted.origin}/`));
+      await cdp.send(allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest',
+        { requestId, ...(allowed ? {} : { errorReason: 'BlockedByClient' }) });
+    });
+    cdp.on('Runtime.exceptionThrown', ({ exceptionDetails }) => errors.push(exceptionDetails.exception?.description ?? exceptionDetails.text));
+    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+    await cdp.send('Page.enable'); await cdp.send('Runtime.enable');
+    await cdp.send('Network.enable'); await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
+    await cdp.send('Target.activateTarget', { targetId: page.id }); await cdp.send('Page.bringToFront');
+    const evaluate = async expression => {
+      const result = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+      assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails));
+      return result.result.value;
+    };
+    const reduce = value => cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value }] });
+    const load = async ({ delayed = false, motion = 'reduce', width = 1440, source = '' } = {}) => {
+      gate = delayed; pendingEntry = undefined; errors = [];
+      await reduce(motion);
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: width < 768 });
+      if (injection) await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: injection });
+      ({ identifier: injection } = await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+        ${source}
+        window.__wheels=[];
+        document.addEventListener('wheel',e=>{if(e.target.closest?.('[data-works-stage]'))
+          window.__wheels.push({trusted:e.isTrusted,cancelled:e.defaultPrevented,ctrl:e.ctrlKey,delta:e.deltaY});});
+      ` }));
+      await cdp.send('Page.navigate', { url: hosted.origin });
+      await until(() => evaluate(`document.readyState!=='loading' && !!document.querySelector('[data-formation-polaroid]')`), 'parsed landing');
+      if (delayed) {
+        await evaluate(`document.querySelector('[data-formation-polaroid]').scrollIntoView({block:'center',behavior:'instant'})`);
+        await until(() => pendingEntry, 'actual formation entry delivery paused');
+        await until(() => evaluate(`[...document.querySelectorAll('astro-island')]
+          .filter(i=>/WorksWheelShowcase|timeline/.test(i.getAttribute('component-url'))).every(i=>!i.hasAttribute('ssr'))`), 'sibling hydration complete');
+        await evaluate(`document.fonts.ready`);
+        await evaluate(`document.querySelector('[data-formation-polaroid]').scrollIntoView({block:'center',behavior:'instant'})`);
+      }
+      else await until(() => evaluate(`Number(document.querySelector('[data-works-stage]')?.dataset.draws)>0`), 'measured archive');
+    };
+    const key = async name => {
+      const code = { ArrowDown: 40, ArrowUp: 38, ArrowRight: 39, Home: 36, End: 35, Enter: 13 }[name];
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: name, code: name, windowsVirtualKeyCode: code });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: name, windowsVirtualKeyCode: code });
+    };
+    const turn = () => evaluate(`Number(document.querySelector('[data-works-stage]').dataset.turn)`);
+    const settled = expected => until(async () => Math.abs(await turn() - expected) < .0005, `settled archive turn ${expected}`);
+    const wheel = async (deltaY, modifiers = 0) => {
+      const hit = await evaluate(`(()=>{const s=document.querySelector('[data-works-stage]'),r=s.getBoundingClientRect();
+        for(let y=Math.max(90,r.top+20);y<Math.min(innerHeight-20,r.bottom);y+=20)
+          for(let x=r.left+20;x<r.right-20;x+=20)
+            if(s.contains(document.elementFromPoint(x,y)))return {x,y};return null;})()`);
+      assert.ok(hit, 'native wheel hits archive');
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', ...hit, deltaX: 0, deltaY, modifiers });
+      await delay(350); // Separate notches beyond the 140ms settle interval.
+    };
+    const clean = () => { assert.deepEqual(errors, []); assert.deepEqual(cdp.errors, []); };
+
+    await t.test('trusted separated 120px notches advance both directions without stealing zoom or boundary scroll', async () => {
+      await load();
+      await evaluate(`document.querySelector('[data-works-stage]').focus({preventScroll:true})`);
+      for (let i = 0; i < 4; i++) await key('ArrowDown');
+      await settled(4);
+      for (const expected of [5, 6]) { await wheel(120); await settled(expected); }
+      for (const expected of [5, 4]) { await wheel(-120); await settled(expected); }
+      assert.equal(await evaluate(`window.__wheels.every(e=>e.trusted&&e.cancelled&&Math.abs(e.delta)===120)`), true);
+      await wheel(120, 2); await settled(4);
+      assert.equal(await evaluate(`window.__wheels.at(-1).cancelled`), false);
+      assert.equal(await evaluate(`window.__wheels.at(-1).ctrl`), true);
+      await evaluate(`scrollTo({top:0,behavior:'instant'});document.querySelector('[data-works-stage]').focus({preventScroll:true})`);
+      await wheel(900); await settled(5);
+      // CDP provides pixel deltas; this is an explicitly controlled line-mode probe.
+      await evaluate(`document.querySelector('[data-works-stage]').dispatchEvent(new WheelEvent('wheel',
+        {deltaY:-3,deltaMode:1,bubbles:true,cancelable:true}))`);
+      await delay(350); await settled(4);
+      await key('Home'); await settled(0);
+      await evaluate(`scrollTo({top:100,behavior:'instant'})`);
+      const startY = await evaluate('scrollY'); await wheel(-120);
+      assert.equal(await evaluate(`window.__wheels.at(-1).cancelled`), false);
+      assert.ok(await evaluate('scrollY') < startY);
+      await key('End'); await settled(8);
+      const endY = await evaluate('scrollY'); await wheel(120);
+      assert.equal(await evaluate(`window.__wheels.at(-1).cancelled`), false);
+      assert.ok(await evaluate('scrollY') > endY); clean();
+    });
+
+    for (const focus of ['link', 'viewport', 'outside']) await t.test(`real delayed formation adopts native selection with ${focus} focus`, async () => {
+      await load({ delayed: true, width: focus === 'viewport' ? 390 : 1440,
+        motion: focus === 'outside' ? 'no-preference' : 'reduce' });
+      const index = 3;
+      await evaluate(`document.querySelectorAll('[data-formation-polaroid] nav a')[${index}].focus({preventScroll:true})`);
+      await key('Enter');
+      await until(() => evaluate(`(()=>{const r=document.querySelector('[data-polaroid-fallback]'),f=r.querySelectorAll('figure')[${index}];
+        return Math.abs(f.getBoundingClientRect().left-r.getBoundingClientRect().left)<1;})()`), 'native anchor selects fourth snapped figure');
+      // Fragment navigation can move focus to body. Explicitly exercise a
+      // number link still owning focus at the moment its fallback is removed.
+      if (focus === 'link') await evaluate(`document.querySelectorAll('[data-formation-polaroid] nav a')[${index}].focus({preventScroll:true})`);
+      if (focus === 'viewport') await evaluate(`document.querySelector('[data-polaroid-fallback]').focus({preventScroll:true})`);
+      if (focus === 'outside') await evaluate(`document.querySelector('a[href="#contacto"]').focus({preventScroll:true});window.__outside=document.activeElement`);
+      // Finish any native fragment scroll before measuring preventScroll.
+      await evaluate(`scrollTo({top:document.querySelector('[data-formation-polaroid]').getBoundingClientRect().top+scrollY-100,behavior:'instant'})`);
+      const before = await evaluate('scrollY');
+      const beforeFocus = await evaluate(`({tag:document.activeElement.tagName,html:document.activeElement.outerHTML.slice(0,180),y:scrollY})`);
+      gate = false; await cdp.send('Fetch.continueRequest', { requestId: pendingEntry }); pendingEntry = undefined;
+      await until(() => evaluate(`document.querySelector('.pl-root')?.dataset.draws>0 && !document.querySelector('[data-polaroid-fallback]')`), 'actual entry hydration draws');
+      await delay(350);
+      t.diagnostic(`${focus} hydration focus: ${JSON.stringify({before:beforeFocus,after:await evaluate(`({tag:document.activeElement.tagName,html:document.activeElement.outerHTML.slice(0,180),y:scrollY})`)})}`);
+      const adopted = { index: await evaluate(`Number(document.querySelector('.pl-root').dataset.active)`),
+        focus: await evaluate(focus === 'outside' ? 'document.activeElement===window.__outside'
+          : `document.activeElement===document.querySelector('.pl-root')`) };
+      assert.deepEqual(adopted, { index, focus: true }, 'adopt native selection and transfer only removed fallback focus');
+      assert.ok(Math.abs(await evaluate('scrollY') - before) < 1, 'focus transfer prevents page scrolling');
+      await reduce('reduce');
+      await until(() => evaluate(`document.querySelector('.pl-root').dataset.reduced==='true'`), 'live reduced motion applied');
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: 768, height: 900, deviceScaleFactor: 1, mobile: false });
+      await delay(200);
+      assert.equal(await evaluate(`Number(document.querySelector('.pl-root').dataset.active)`), index, 'responsive spacing retains selected photo');
+      await evaluate(`document.querySelector('.pl-root').scrollIntoView({block:'center',behavior:'instant'});document.querySelector('.pl-root').focus({preventScroll:true})`);
+      await key('ArrowRight');
+      await until(() => evaluate(`Number(document.querySelector('.pl-root').dataset.active)===4`), 'adopted carousel remains keyboard usable'); clean();
+    });
+
+    await t.test('missing observer capabilities keep usable native formation', async () => {
+      for (const capability of ['ResizeObserver', 'IntersectionObserver']) {
+        await load({ delayed: true, source: `window.${capability}=undefined;` });
+        gate = false; await cdp.send('Fetch.continueRequest', { requestId: pendingEntry }); pendingEntry = undefined;
+        await until(() => evaluate(`[...document.querySelectorAll('astro-island')].filter(i=>/FormationPolaroid/.test(i.getAttribute('component-url')))
+          .every(i=>!i.hasAttribute('ssr'))`), 'capability fallback hydration complete');
+        assert.equal(await evaluate(`!!document.querySelector('[data-polaroid-fallback]')&&!document.querySelector('.pl-root')`), true);
+        await evaluate(`document.querySelectorAll('[data-formation-polaroid] nav a')[2].focus({preventScroll:true})`);
+        await key('Enter');
+        await until(() => evaluate(`(()=>{const r=document.querySelector('[data-polaroid-fallback]');return Math.abs(r.querySelectorAll('figure')[2]
+          .getBoundingClientRect().left-r.getBoundingClientRect().left)<1;})()`), 'native gallery remains navigable'); clean();
+      }
+    });
+  } finally {
+    if (cdp) { try { await cdp.send('Browser.close'); } catch {} cdp.close(); }
+    if (browser.exitCode === null) browser.kill();
+    hosted.server.closeAllConnections(); await new Promise(done => hosted.server.close(done));
+  }
+});
+
 test('polaroid gesture ownership and hydration sizing', { timeout: 150000 }, async (t) => {
   await access(temporary);
   await access(browserPath);

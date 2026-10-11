@@ -39,7 +39,22 @@ test('phase follows elapsed time and never catches up after background suspensio
   assert.ok(Math.abs(at30 - .32) < 1e-12);
   assert.equal(advancePhase(0, 600), .032);
   assert.equal(advancePhase(1, -1), 1);
-  assert.ok(advancePhase(Math.PI * 2 - .01, .1) < .04);
+  // The 1 and .8 phase frequencies share a 10π period, not 2π.
+  assert.ok(advancePhase(Math.PI * 10 - .01, .1) < .04);
+});
+
+test('interaction continuity regressions: projected surface matches unwrapped physics across both boundaries', () => {
+  for (const width of [390, 1440]) {
+    const { columns, rows } = waveBudget(width, 1);
+    const grid = createWaveGrid(columns, rows);
+    for (const boundary of [Math.PI * 2, Math.PI * 10]) {
+      const phase = boundary - .01;
+      const actual = projectWave(grid, new Float32Array(grid.length), width, 779, advancePhase(phase, .1));
+      const expected = projectWave(grid, new Float32Array(grid.length), width, 779, phase + .032);
+      const error = Math.max(...actual.map((value, index) => Math.abs(value - expected[index])));
+      assert.ok(error < .0001, `${width}px at ${boundary}: projected error ${error}px`);
+    }
+  }
 });
 
 test('owned frame reconciles reduced motion before delayed media callback delivery', { concurrency: false }, () => {

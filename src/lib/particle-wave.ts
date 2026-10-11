@@ -8,7 +8,8 @@ export function waveBudget(width: number, dpr: number) {
 }
 
 export function advancePhase(phase: number, elapsedSeconds: number) {
-  return (phase + Math.min(.1, Math.max(0, elapsedSeconds)) * .32) % (Math.PI * 2);
+  // Frequencies 1 and .8 complete five and four cycles together at 10π.
+  return (phase + Math.min(.1, Math.max(0, elapsedSeconds)) * .32) % (Math.PI * 10);
 }
 
 // Grid and output buffers are allocated only when the geometry budget changes.

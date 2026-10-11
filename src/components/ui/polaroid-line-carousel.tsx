@@ -17,6 +17,7 @@ export type Slide = {
 };
 export type PolaroidLineCarouselProps = {
   slides: Slide[];
+  initialIndex?: number;
   height?: number | string;
   cardWidth?: number;
   sag?: number;
@@ -90,22 +91,25 @@ const PL_CSS = [
 ].join('\n');
 
 export default function PolaroidLineCarousel({
-  slides, height = 540, cardWidth = 260, sag = 28, swing = 1, autoplay = 4500,
+  slides, initialIndex = 0, height = 540, cardWidth = 260, sag = 28, swing = 1, autoplay = 4500,
   string = '#8a7f72', background = '#efece6', ink = '#161513',
   onChange, className, style, ariaLabel = 'Encuentros de formación',
 }: PolaroidLineCarouselProps) {
   const n = slides.length;
-  const [active, setActive] = React.useState(0), [dragging, setDragging] = React.useState(false);
+  const initial = clamp(initialIndex, 0, Math.max(0, n - 1));
+  const [active, setActive] = React.useState(initial), [dragging, setDragging] = React.useState(false);
   const [size, setSize] = React.useState({ w: 520, h: 540, cw: cardWidth });
   const rootRef = React.useRef<HTMLDivElement>(null), pathRef = React.useRef<SVGPathElement>(null);
   const barRef = React.useRef<HTMLDivElement>(null);
   const cards = React.useRef<(HTMLDivElement | null)[]>([]);
-  const sim = React.useRef({ off: 0, vel: 0, target: 0, a: [] as number[], w: [] as number[] });
+  // Seed both pose and destination before the first responsive spacing remap.
+  const sim = React.useRef({ off: initial * cardWidth * 1.08, vel: 0,
+    target: initial * cardWidth * 1.08, a: [] as number[], w: [] as number[] });
   const drag = React.useRef<null | { pointerId: number; pointerType: string; x: number; y: number; off: number; lx: number; lt: number; v: number; moved: boolean; vertical: boolean }>(null);
   const disposeGesture = React.useRef<() => void>(() => {});
-  const lastTouch = React.useRef(0), activeRef = React.useRef(0), opts = React.useRef({ sag, swing });
+  const lastTouch = React.useRef(0), activeRef = React.useRef(initial), opts = React.useRef({ sag, swing });
   const reduced = React.useRef(false), wake = React.useRef<() => void>(() => {});
-  const destination = React.useRef(0);
+  const destination = React.useRef(initial);
   opts.current = { sag, swing };
   const spacing = size.cw * 1.08;
   const previousSpacing = React.useRef(spacing);

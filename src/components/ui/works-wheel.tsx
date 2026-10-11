@@ -270,7 +270,7 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
     if (!el || !ready) return;
     const onWheel = (event: WheelEvent) => {
       // Ctrl+wheel also represents trackpad pinch; leave browser zoom native.
-      if (event.ctrlKey) return;
+      if (event.ctrlKey || event.deltaY === 0) return;
       // Release outward movement at both boundaries to native page scrolling.
       if ((target.current === 0 && event.deltaY <= 0)
         || (target.current === last + 1 && event.deltaY >= 0)) return;
@@ -278,7 +278,11 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
       const pixels = event.deltaY * (event.deltaMode === 1 ? 16 : event.deltaMode === 2 ? el.clientHeight : 1);
       to(target.current + pixels / WHEEL_UNITS);
       window.clearTimeout(settling.current);
-      settling.current = window.setTimeout(() => to(Math.round(target.current)), SETTLE);
+      // A separated notch must finish in its intended direction, not round
+      // back to the same card after cancelling the page's native scroll.
+      settling.current = window.setTimeout(() => {
+        to(pixels > 0 ? Math.ceil(target.current) : Math.floor(target.current));
+      }, SETTLE);
     };
     el.addEventListener("wheel", onWheel, { passive: false });
     return () => {
