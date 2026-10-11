@@ -81,10 +81,12 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
   const turn = React.useRef(0);
   const target = React.useRef(0);
   const settling = React.useRef(0);
-  const drag = React.useRef<{ coordinate: number; moved: number; touch: boolean } | null>(null);
+  const drag = React.useRef<{ pointerId: number; coordinate: number; moved: number; touch: boolean;
+    dispose: () => void } | null>(null);
   const suppressClick = React.useRef(false);
   const [active, setActive] = React.useState(0);
   const [stage, setStage] = React.useState<Stage>({ w: 0, h: 0 });
+  const ready = stage.w > 0 && stage.h > 0;
   const [reduced, setReduced] = React.useState(false);
   const count = items.length;
   const last = Math.max(count - 1, 0);
@@ -160,7 +162,29 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
 
   // Draw only while moving. Inputs wake the loop; rest schedules no idle RAF.
   React.useEffect(() => {
-    if (!stage.h) return;
+    if (!ready) {
+      turn.current = target.current = 0;
+      setActive(0);
+      for (const card of cardRefs.current) {
+        if (!card) continue;
+        for (const property of ['width', 'height', 'margin-left', 'margin-top', 'transform', 'opacity', 'pointer-events', 'z-index']) {
+          card.style.removeProperty(property);
+        }
+        (card.firstElementChild as HTMLElement | null)?.style.removeProperty('transform');
+      }
+      if (wheelRef.current) {
+        for (const property of ['transform', 'top', 'left']) wheelRef.current.style.removeProperty(property);
+      }
+      labelRef.current?.style.removeProperty('opacity');
+      titleRef.current?.style.removeProperty('opacity');
+      if (stageRef.current) stageRef.current.dataset.turn = '0';
+      if (previousMode.current !== 'ring') {
+        previousMode.current = 'ring';
+        onModeChange?.('ring');
+      }
+      // React owns the CSS ring variables; only clear the imperative poses.
+      return;
+    }
     let frame = 0;
     const { ringR, ringX, ringScale, drumR, bow } = metrics;
     const draw = () => {
@@ -222,16 +246,28 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
     wake.current = () => { if (!frame) frame = requestAnimationFrame(draw); };
     wake.current();
     return () => { cancelAnimationFrame(frame); wake.current = () => {}; };
-  }, [metrics, stage.h, count, last, reduced, onModeChange]);
+  }, [metrics, stage.h, ready, count, last, reduced, onModeChange]);
 
   const to = React.useCallback((next: number) => {
+    if (!ready) return;
     target.current = clamp(next, 0, last + 1);
     wake.current();
-  }, [last]);
+  }, [last, ready]);
+
+  const endDrag = React.useCallback((pointerId?: number, settle = true) => {
+    const current = drag.current;
+    if (!current || (pointerId !== undefined && current.pointerId !== pointerId)) return;
+    drag.current = null;
+    current.dispose();
+    suppressClick.current = current.moved > 5;
+    const el = stageRef.current;
+    if (el?.hasPointerCapture(current.pointerId)) el.releasePointerCapture(current.pointerId);
+    if (settle && current.moved) to(Math.round(target.current));
+  }, [to]);
 
   React.useEffect(() => {
     const el = stageRef.current;
-    if (!el) return;
+    if (!el || !ready) return;
     const onWheel = (event: WheelEvent) => {
       // Release outward movement at both boundaries to native page scrolling.
       if ((target.current === 0 && event.deltaY <= 0)
@@ -246,19 +282,14 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
     return () => {
       el.removeEventListener("wheel", onWheel);
       window.clearTimeout(settling.current);
-      drag.current = null;
+      endDrag(undefined, false);
     };
-  }, [to, last]);
+  }, [to, last, ready, endDrag]);
 
   const select = (next: number) => {
+    if (!ready) return;
     window.clearTimeout(settling.current);
     to(next);
-  };
-  const endDrag = (event: React.PointerEvent<HTMLDivElement>) => {
-    suppressClick.current = (drag.current?.moved ?? 0) > 5;
-    drag.current = null;
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    to(Math.round(target.current));
   };
 
   return (
@@ -266,21 +297,40 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
       className={cn("bg-background text-foreground relative w-full overflow-hidden select-none rounded-xl", className)} {...props}>
       <div className="works-viewport relative"
         style={{ height: `calc(var(--hero-height) - ${controlsHeight}px)` }}>
-        <div ref={stageRef} id={stageId} data-works-stage data-turn="0" tabIndex={stage.w ? 0 : undefined} role={stage.w ? 'listbox' : 'group'}
+        <div ref={stageRef} id={stageId} data-works-stage data-turn="0" tabIndex={ready ? 0 : undefined} role={ready ? 'listbox' : 'group'}
           aria-label="Afiches de actividades" aria-describedby={instructionsId}
-          aria-activedescendant={stage.w ? `${id}-work-${active}` : undefined}
+          aria-activedescendant={ready ? `${id}-work-${active}` : undefined}
           className="absolute inset-0 cursor-grab touch-pan-y outline-none focus-visible:outline-2 focus-visible:outline-paper focus-visible:-outline-offset-4 active:cursor-grabbing"
           style={{ perspective: `${metrics.depth}px` }}
           onPointerDown={event => {
-            if (event.button !== 0) return;
+            if (!ready || event.button !== 0 || drag.current) return;
             window.clearTimeout(settling.current);
             const touch = event.pointerType !== "mouse";
             suppressClick.current = false;
-            drag.current = { coordinate: touch ? event.clientX : event.clientY, moved: 0, touch };
+            const release = (native: PointerEvent) => endDrag(native.pointerId);
+            const checkButtons = (native: PointerEvent) => {
+              if (native.pointerType === 'mouse' && !(native.buttons & 1)) endDrag(native.pointerId);
+            };
+            const blur = () => endDrag();
+            window.addEventListener('pointerup', release);
+            window.addEventListener('pointercancel', release);
+            window.addEventListener('pointermove', checkButtons);
+            window.addEventListener('blur', blur);
+            drag.current = { pointerId: event.pointerId, coordinate: touch ? event.clientX : event.clientY, moved: 0, touch,
+              dispose: () => {
+                window.removeEventListener('pointerup', release);
+                window.removeEventListener('pointercancel', release);
+                window.removeEventListener('pointermove', checkButtons);
+                window.removeEventListener('blur', blur);
+              } };
           }}
           onPointerMove={event => {
             const current = drag.current;
-            if (!current) return;
+            if (!ready || !current || current.pointerId !== event.pointerId) return;
+            if (!current.touch && !(event.buttons & 1)) {
+              endDrag(event.pointerId);
+              return;
+            }
             const coordinate = current.touch ? event.clientX : event.clientY;
             const distance = current.coordinate - coordinate;
             current.moved += Math.abs(distance);
@@ -290,8 +340,14 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
             to(target.current + distance / DRAG_UNITS);
             current.coordinate = coordinate;
           }}
-          onPointerUp={endDrag} onPointerCancel={endDrag}
+          onPointerUp={event => endDrag(event.pointerId)} onPointerCancel={event => endDrag(event.pointerId)}
+          onLostPointerCapture={event => {
+            // Touch's implicit anchor capture can transfer to the stage. Only
+            // losing the stage's own capture retires the enhanced gesture.
+            if (event.target === event.currentTarget) endDrag(event.pointerId);
+          }}
           onKeyDown={event => {
+            if (!ready) return;
             if (event.key === "ArrowDown") select(Math.round(target.current) + 1);
             else if (event.key === "ArrowUp") select(Math.round(target.current) - 1);
             else if (event.key === "Home") select(0);
@@ -301,7 +357,7 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
           }}>
           <div ref={wheelRef} className="works-ring absolute top-1/2 left-1/2 [transform-style:preserve-3d]">
             {items.map((item, i) => (
-              <div key={item.id} id={`${id}-work-${i}`} role={stage.w ? 'option' : undefined} aria-selected={stage.w ? i === active : undefined}
+              <div key={item.id} id={`${id}-work-${i}`} role={ready ? 'option' : undefined} aria-selected={ready ? i === active : undefined}
                 aria-label={item.title} data-work-card={i}
                 ref={node => { cardRefs.current[i] = node; }}
                 onClick={() => { if (!suppressClick.current) select(i + 1); }}
@@ -313,7 +369,7 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
                 } as React.CSSProperties}>
                 <span data-work-face className="relative block size-full overflow-hidden rounded-lg bg-transparent">
                   <a data-hero-photo href={item.image} draggable={false} aria-label={`${item.title} · Afiche de archivo`}
-                    tabIndex={stage.w ? -1 : 0} onClick={event => { if (stage.w) event.preventDefault(); }}
+                    tabIndex={ready ? -1 : 0} onClick={event => { if (ready) event.preventDefault(); }}
                     className="block size-full">
                   <picture className="block size-full">
                     <source type="image/avif" srcSet={item.avif} sizes="(min-width: 900px) 58vw, 88vw" />
@@ -336,7 +392,7 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
           className="sr-only"
           style={{ fontSize: metrics.title }}>{items[active]?.title}</div>
       </div>
-      <p className="sr-only" id={instructionsId}>{stage.w ? 'Usa ↑ y ↓ o gira con la rueda del ratón. Arrastra verticalmente con ratón u horizontalmente en pantalla táctil. Inicio vuelve al círculo; Fin muestra el último afiche.' : 'Afiches de archivo; no son convocatorias vigentes. Abre cada imagen para consultar el afiche completo.'}</p>
+      <p className="sr-only" id={instructionsId}>{ready ? 'Usa ↑ y ↓ o gira con la rueda del ratón. Arrastra verticalmente con ratón u horizontalmente en pantalla táctil. Inicio vuelve al círculo; Fin muestra el último afiche.' : 'Afiches de archivo; no son convocatorias vigentes. Abre cada imagen para consultar el afiche completo.'}</p>
       {showControls && <div ref={controlsRef} className="relative z-10 flex flex-col items-center p-1 text-center text-sm">
         <ol className="text-muted-foreground flex flex-wrap justify-center w-[352px] max-w-full max-[359px]:w-44 text-center leading-[1.75]"
           style={{ fontSize: metrics.index }} aria-label="Elegir actividad">

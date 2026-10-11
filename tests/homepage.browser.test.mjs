@@ -106,6 +106,276 @@ async function connect(url) {
   };
 }
 
+test('works wheel input ownership', { timeout: 150000 }, async (t) => {
+  await access(temporary);
+  await access(browserPath);
+  const hosted = await staticServer();
+  const profile = await mkdtemp(join(temporary, 'chiledao-wheel-input-profile-'));
+  const browser = spawn(browserPath, [
+    '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+    `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
+    '--disable-background-networking', '--disable-component-update', '--disable-sync',
+    '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
+  ], { stdio: 'ignore', windowsHide: true });
+  let cdp, injection, errors = [];
+  try {
+    const port = await until(async () => {
+      try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
+      catch { return false; }
+    }, 'owned wheel input browser port', 15000);
+    const page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(p => p.type === 'page');
+    cdp = await connect(page.webSocketDebuggerUrl);
+    cdp.on('Fetch.requestPaused', async ({ requestId, request }) => {
+      const url = new URL(request.url);
+      const allowed = url.origin === hosted.origin || url.protocol === 'data:'
+        || (url.protocol === 'blob:' && request.url.startsWith(`blob:${hosted.origin}/`));
+      await cdp.send(allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest',
+        { requestId, ...(allowed ? {} : { errorReason: 'BlockedByClient' }) });
+    });
+    cdp.on('Runtime.exceptionThrown', ({ exceptionDetails }) => errors.push(exceptionDetails.exception?.description ?? exceptionDetails.text));
+    cdp.on('Runtime.consoleAPICalled', ({ type, args }) => {
+      if (type === 'error') errors.push(args.map(a => a.value ?? a.description).join(' '));
+    });
+    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+    await cdp.send('Page.enable'); await cdp.send('Runtime.enable');
+    await cdp.send('Network.enable'); await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
+    await cdp.send('Target.activateTarget', { targetId: page.id }); await cdp.send('Page.bringToFront');
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    const evaluate = async expression => {
+      const result = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+      assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails));
+      return result.result.value;
+    };
+    const load = async (source = '') => {
+      if (injection) await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: injection });
+      errors = [];
+      ({ identifier: injection } = await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+        ${source}
+        window.__inputRows=[];window.__owner=null;window.__captures=0;
+        window.__windowListeners=[];
+        const add=window.addEventListener,remove=window.removeEventListener;
+        window.addEventListener=function(type,callback,...rest){
+          if(['pointerup','pointercancel','pointermove','blur'].includes(type))
+            window.__windowListeners.push({type,callback,removed:false});
+          return add.call(this,type,callback,...rest);
+        };
+        window.removeEventListener=function(type,callback,...rest){
+          const row=window.__windowListeners.findLast(r=>r.type===type&&r.callback===callback&&!r.removed);
+          if(row)row.removed=true;return remove.call(this,type,callback,...rest);
+        };
+        for(const type of ['pointerdown','pointermove','pointerup','pointercancel','gotpointercapture','lostpointercapture','wheel','keydown'])
+          document.addEventListener(type,e=>{
+            const stage=e.target.closest?.('[data-works-stage]');
+            if(type==='pointerdown'&&stage&&e.isTrusted)window.__owner=e.pointerId;
+            if(type==='gotpointercapture'&&stage)window.__captures++;
+            window.__inputRows.push({type,id:e.pointerId,buttons:e.buttons,key:e.key,trusted:e.isTrusted,
+              stage:!!stage,stageTarget:e.target===stage,cancelled:e.defaultPrevented});
+          });
+      ` }));
+      await cdp.send('Page.navigate', { url: hosted.origin });
+      await until(() => evaluate(`document.readyState==='complete' && [...document.querySelectorAll('astro-island')]
+        .filter(i=>/WorksWheelShowcase|timeline/.test(i.getAttribute('component-url'))).every(i=>!i.hasAttribute('ssr'))
+        && !!document.querySelector('[data-works-stage]')`), 'actual hero and timeline hydration');
+      await evaluate('new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))');
+    };
+    const pose = () => evaluate(`(() => {const s=document.querySelector('[data-works-stage]');return {
+      turn:s.dataset.turn,draws:s.dataset.draws??null,captured:s.hasPointerCapture(window.__owner??1),
+      transforms:[...s.querySelectorAll('[data-work-card]')].map(e=>e.style.transform),
+      selected:[...s.querySelectorAll('[aria-selected="true"]')].map(e=>e.dataset.workCard)};})()`);
+    const mouse = (type, point, held = false) => cdp.send('Input.dispatchMouseEvent',
+      { type, x: point.x, y: point.y, button: held || type !== 'mouseMoved' ? 'left' : 'none',
+        buttons: held ? 1 : 0, ...(type !== 'mouseMoved' ? { clickCount: 1 } : {}) });
+    const points = () => evaluate(`(() => {const s=document.querySelector('[data-works-stage]'),r=s.getBoundingClientRect();
+      const inside={x:r.left+r.width/2,y:r.top+r.height*.6},outside={x:r.left-12,y:inside.y};
+      return {inside,outside,insideHit:s.contains(document.elementFromPoint(inside.x,inside.y)),
+        outsideHit:!s.contains(document.elementFromPoint(outside.x,outside.y))};})()`);
+    const key = async name => {
+      const code = { ArrowDown: 40, ArrowUp: 38, Home: 36, End: 35, Enter: 13 }[name];
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: name, code: name, windowsVirtualKeyCode: code,
+        ...(name === 'Enter' ? { text: '\r' } : {}) });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: name, windowsVirtualKeyCode: code });
+    };
+    const clean = () => { assert.deepEqual(errors, []); assert.deepEqual(cdp.errors, []); };
+    const liveListeners = () => evaluate(`window.__windowListeners.filter(r=>!r.removed).map(r=>r.type).sort()`);
+    const artworkPoint = () => evaluate(`(async () => {
+      for(const a of document.querySelectorAll('[data-hero-photo]')){
+        await a.querySelector('img').decode();const r=a.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
+        if(y>0&&y<innerHeight&&a.contains(document.elementFromPoint(x,y)))return {x,y,href:a.href,index:Number(a.closest('[data-work-card]').dataset.workCard)};
+      }return null;
+    })()`);
+
+    await t.test('unmeasured hydrated ring leaves real wheel, keys and pointers native', async () => {
+      await load('window.ResizeObserver=undefined;');
+      assert.equal(await evaluate(`document.querySelector('[data-works-stage]').getAttribute('role')`), 'group');
+      const before = await pose();
+      assert.equal(before.draws, null, 'hydrated geometry remains unmeasured');
+      const p = await points(); assert.equal(p.insideHit, true);
+      const start = await evaluate('scrollY');
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', ...p.inside, deltaX: 0, deltaY: 160 });
+      await delay(300);
+      const wheel = await evaluate(`window.__inputRows.filter(r=>r.type==='wheel').at(-1)`);
+      assert.equal(wheel?.trusted, true); assert.equal(wheel?.stage, true);
+      assert.equal(wheel.cancelled, false, 'unmeasured stage must not consume the real page wheel');
+      assert.ok(await evaluate('scrollY') > start+20, 'wheel inside hero actually scrolls the native page');
+      for (const name of ['End', 'Home', 'ArrowDown', 'ArrowUp']) {
+        await evaluate(`scrollTo({top:100,behavior:'instant'});document.querySelector('[data-hero-photo]').focus({preventScroll:true})`);
+        const y = await evaluate('scrollY'); await key(name); await delay(250);
+        const row = await evaluate(`window.__inputRows.filter(r=>r.type==='keydown').at(-1)`);
+        assert.equal(row.trusted, true); assert.equal(row.stage, true); assert.equal(row.cancelled, false, `${name} remains native`);
+        assert.notEqual(await evaluate('scrollY'), y, `${name} has actual native page behavior`);
+      }
+      await evaluate(`scrollTo({top:0,behavior:'instant'})`);
+      const pointer = await points(); assert.equal(pointer.insideHit, true);
+      await mouse('mousePressed', pointer.inside, true);
+      await mouse('mouseMoved', { x:pointer.inside.x, y:pointer.inside.y-60 }, true);
+      assert.equal((await pose()).captured, false, 'fallback never acquires capture');
+      await mouse('mouseReleased', pointer.outside);
+      await delay(200); assert.deepEqual(await pose(), before, 'no phantom selection or draw');
+      assert.equal(await evaluate('window.__captures'), 0);
+      await evaluate(`document.querySelector('[data-hero-photo]').focus({preventScroll:true})`);
+      const href = await evaluate('document.activeElement.href'); await key('Enter');
+      await until(async () => (await cdp.send('Page.getFrameTree')).frameTree.frame.url === href, 'native Enter opens original artwork URL');
+      await load('window.ResizeObserver=undefined;');
+      const artwork = await artworkPoint(); assert.ok(artwork, 'hit-tested native artwork is reachable');
+      await mouse('mousePressed', artwork, true); await mouse('mouseReleased', artwork);
+      await until(async () => (await cdp.send('Page.getFrameTree')).frameTree.frame.url === artwork.href, 'native click opens original artwork URL');
+      clean();
+    });
+
+    await t.test('outside release before capture cannot turn subsequent mouse hover into a drag', async () => {
+      await load(); await until(() => evaluate(`Number(document.querySelector('[data-works-stage]').dataset.draws)>0`), 'measured initial draw');
+      const p = await points(); assert.equal(p.insideHit, true); assert.equal(p.outsideHit, true);
+      const before = await pose();
+      const listeners = await liveListeners();
+      await mouse('mousePressed', p.inside, true);
+      await mouse('mouseMoved', p.outside, true);
+      assert.equal((await pose()).captured, false, 'horizontal exit is below the vertical capture threshold');
+      await mouse('mouseReleased', p.outside);
+      const release = await evaluate(`window.__inputRows.filter(r=>r.type==='pointerup').at(-1)`);
+      assert.equal(release.trusted, true); assert.equal(release.stage, false, 'real release lands outside stage');
+      await mouse('mouseMoved', { x:p.inside.x, y:p.inside.y-100 });
+      await delay(200);
+      assert.deepEqual(await pose(), before, 'released mouse hover cannot change actual artwork poses or turn');
+      assert.deepEqual(await liveListeners(), listeners, 'outside release removes every acquired global listener');
+      clean();
+    });
+
+    await t.test('held mouse ownership, captured release and cancellation retire only the owner', async () => {
+      await load(); await until(() => evaluate(`Number(document.querySelector('[data-works-stage]').dataset.draws)>0`), 'measured ring');
+      const p = await points(); assert.equal(p.insideHit, true); assert.equal(p.outsideHit, true);
+      const listeners = await liveListeners();
+      await mouse('mousePressed', p.inside, true);
+      await mouse('mouseMoved', { x:p.inside.x, y:p.inside.y-100 }, true);
+      await until(async () => Number((await pose()).turn) > .2, 'normal held vertical mouse drag changes pose');
+      assert.equal((await pose()).captured, true);
+      const held = await pose();
+      // Controlled foreign events test identity rejection, not native multitouch.
+      await evaluate(`(() => {const s=document.querySelector('[data-works-stage]');
+        for(const type of ['pointerdown','pointermove','pointerup','pointercancel','lostpointercapture'])
+          s.dispatchEvent(new PointerEvent(type,{bubbles:true,pointerId:77,pointerType:'touch',button:0,buttons:1,clientX:10,clientY:10}));})()`);
+      await delay(100); assert.deepEqual(await pose(), held, 'foreign pointer cannot replace, move or end the captured owner');
+      await mouse('mouseReleased', p.outside);
+      await delay(200); assert.equal((await pose()).captured, false);
+      assert.deepEqual(await liveListeners(), listeners, 'captured release removes acquired listener identities');
+      const retired = await pose();
+      await mouse('mouseMoved', { x:p.inside.x, y:p.inside.y-150 }); await delay(150);
+      assert.deepEqual(await pose(), retired, 'captured outside release retires hover ownership');
+      for (const retirement of ['button loss', 'pointercancel', 'capture loss']) {
+        await mouse('mousePressed', p.inside, true);
+        await mouse('mouseMoved', { x:p.inside.x, y:p.inside.y-50 }, true);
+        await delay(100); assert.equal((await pose()).captured, true);
+        if (retirement === 'button loss') await mouse('mouseMoved', { x:p.inside.x, y:p.inside.y-55 });
+        else if (retirement === 'capture loss') await evaluate(`document.querySelector('[data-works-stage]').releasePointerCapture(window.__owner)`);
+        else await evaluate(`document.querySelector('[data-works-stage]').dispatchEvent(new PointerEvent('pointercancel',
+          {bubbles:true,pointerId:window.__owner,pointerType:'mouse'}))`);
+        await mouse('mouseMoved', { x:p.inside.x, y:p.inside.y-60 });
+        await delay(200); assert.equal((await pose()).captured, false, `${retirement} releases capture`);
+        assert.deepEqual(await liveListeners(), listeners, `${retirement} removes acquired listener identities`);
+        const stopped = await pose();
+        await mouse('mouseMoved', { x:p.inside.x, y:p.inside.y-160 }); await delay(150);
+        assert.deepEqual(await pose(), stopped, `${retirement} cannot leave a hover-driven gesture`);
+        await mouse('mouseReleased', p.outside);
+      }
+      clean();
+    });
+
+    await t.test('measured controls and clicks work while readiness loss disposes gesture resources', async () => {
+      await load(); await until(() => evaluate(`Number(document.querySelector('[data-works-stage]').dataset.draws)>0`), 'measured stage');
+      const artwork = await artworkPoint(); assert.ok(artwork, 'enhanced artwork has a legitimate click target');
+      await mouse('mousePressed', artwork, true);
+      assert.equal((await pose()).captured, false, 'ordinary image click is not captured at pointerdown');
+      await mouse('mouseReleased', artwork);
+      await until(async () => Number((await pose()).turn) === artwork.index+1, 'click still selects enhanced artwork');
+      assert.equal((await cdp.send('Page.getFrameTree')).frameTree.frame.url, hosted.origin+'/', 'enhanced click stays on landing');
+      await evaluate(`document.querySelector('[data-works-stage]').focus({preventScroll:true})`);
+      await key('End'); await until(async () => Number((await pose()).turn) === 8, 'End still selects last artwork');
+      await key('ArrowUp'); await until(async () => Number((await pose()).turn) === 7, 'ArrowUp still selects previous artwork');
+      await key('Home'); await until(async () => Number((await pose()).turn) === 0, 'Home restores original ring');
+      const p = await points(); assert.equal(p.insideHit, true);
+      const listeners = await liveListeners();
+      await mouse('mousePressed', p.inside, true);
+      await mouse('mouseMoved', {x:p.inside.x,y:p.inside.y-60}, true);
+      await delay(100); assert.equal((await pose()).captured, true);
+      // A real layout change invokes the native ResizeObserver with zero height.
+      await evaluate(`document.querySelector('[data-works-stage]').style.height='0px'`);
+      await until(() => evaluate(`document.querySelector('[data-works-stage]').getAttribute('role')==='group'`), 'actual measured readiness loss');
+      assert.equal((await pose()).captured, false);
+      assert.deepEqual(await liveListeners(), listeners, 'readiness teardown releases owned listeners');
+      assert.equal((await pose()).turn, '0');
+      assert.ok((await pose()).transforms.every(p=>p===''), 'readiness loss restores CSS-owned poses');
+      assert.equal(await evaluate(`document.querySelector('[data-work-card]').style.getPropertyValue('--ring-angle')`), '0deg', 'React ring variables survive cleanup');
+      await mouse('mouseReleased', p.outside);
+      await evaluate(`document.querySelector('[data-works-stage]').style.removeProperty('height')`);
+      await until(() => evaluate(`document.querySelector('[data-works-stage]').getAttribute('role')==='listbox'`), 'native measurement reentry');
+      await delay(200); const restored = await pose();
+      await mouse('mouseMoved', {x:p.inside.x,y:p.inside.y-100}); await delay(150);
+      assert.deepEqual(await pose(), restored, 'reentry has no retained target, gesture or idle RAF');
+      clean();
+    });
+
+    await t.test('real touch horizontal drag and cancellation preserve vertical native page pan', async () => {
+      await cdp.send('Emulation.setDeviceMetricsOverride', {width:390,height:844,deviceScaleFactor:1,mobile:true});
+      await cdp.send('Emulation.setTouchEmulationEnabled', {enabled:true,maxTouchPoints:2});
+      await load(); await until(() => evaluate(`Number(document.querySelector('[data-works-stage]').dataset.draws)>0`), 'mobile measured ring');
+      const p = await evaluate(`(() => {const s=document.querySelector('[data-works-stage]'),r=s.getBoundingClientRect();
+        for(let y=Math.max(100,r.top+20);y<Math.min(innerHeight-100,r.bottom);y+=20)
+          for(let x=r.left+90;x<r.right-20;x+=20)
+            if(s.contains(document.elementFromPoint(x,y)))return {x,y};return null;})()`);
+      assert.ok(p, 'touch starts on actual stage hit target');
+      const touch = (type, point) => cdp.send('Input.dispatchTouchEvent',
+        {type,touchPoints:point?[{...point,id:1,radiusX:2,radiusY:2}]:[]});
+      const listeners = await liveListeners();
+      await evaluate(`document.querySelector('[data-works-stage]').focus({preventScroll:true})`); await key('ArrowDown');
+      await until(async () => Number((await pose()).turn) === 1, 'mobile front artwork selected');
+      const artwork = await artworkPoint(); assert.ok(artwork, 'touch hits the actual front image');
+      await touch('touchStart', {x:artwork.x,y:artwork.y});
+      await touch('touchMove', {x:artwork.x-35,y:artwork.y});
+      await touch('touchMove', {x:artwork.x-70,y:artwork.y});
+      await until(async () => Number((await pose()).turn) > 1.15, 'real horizontal artwork touch survives implicit capture transfer');
+      assert.equal(await evaluate(`window.__inputRows.filter(r=>r.type==='pointerdown'&&r.trusted).at(-1).stageTarget`), false,
+        'touch begins on artwork descendant, not the stage itself');
+      await touch('touchCancel'); await delay(200);
+      assert.equal((await pose()).captured, false);
+      assert.deepEqual(await liveListeners(), listeners, 'native touch cancellation disposes ownership');
+      assert.equal(await evaluate(`window.__inputRows.some(r=>r.type==='pointercancel'&&r.trusted)`), true, 'native pointercancel receipt');
+      await evaluate(`document.querySelector('[data-works-stage]').focus({preventScroll:true})`); await key('Home');
+      await delay(100); const y = await evaluate('scrollY');
+      await touch('touchStart', p);
+      for(let step=1;step<=5;step++) {await touch('touchMove', {x:p.x,y:p.y-step*25}); await delay(30);}
+      await touch('touchEnd'); await delay(250);
+      assert.ok(await evaluate('scrollY')>y+30, 'vertical touch on hero actually pans native page');
+      assert.equal((await pose()).turn, '0', 'vertical page pan never selects an artwork');
+      assert.deepEqual(await liveListeners(), listeners);
+      clean();
+    });
+  } finally {
+    if (cdp) { try { await cdp.send('Browser.close'); } catch {} cdp.close(); }
+    if (browser.exitCode === null) browser.kill();
+    hosted.server.closeAllConnections(); await new Promise(done => hosted.server.close(done));
+  }
+});
+
 test('observer ownership and reduced-motion drag', { timeout: 150000 }, async (t) => {
   await access(temporary);
   await access(browserPath);
