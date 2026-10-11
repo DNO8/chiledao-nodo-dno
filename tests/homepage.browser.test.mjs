@@ -680,6 +680,141 @@ test('works wheel zoom and archive keyboard navigation', { timeout: 150000 }, as
   }
 });
 
+test('archive semantics and keyboard ownership', { timeout: 150000 }, async (t) => {
+  await access(temporary);
+  await access(browserPath);
+  const hosted = await staticServer();
+  const profile = await mkdtemp(join(temporary, 'chiledao-archive-semantics-profile-'));
+  const browser = spawn(browserPath, [
+    '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+    `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
+    '--disable-background-networking', '--disable-component-update', '--disable-sync',
+    '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
+  ], { stdio: 'ignore', windowsHide: true });
+  let cdp, errors = [];
+  try {
+    const port = await until(async () => {
+      try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
+      catch { return false; }
+    }, 'owned archive semantics browser port', 15000);
+    const page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(p => p.type === 'page');
+    cdp = await connect(page.webSocketDebuggerUrl);
+    cdp.on('Fetch.requestPaused', async ({ requestId, request }) => {
+      const url = new URL(request.url);
+      const allowed = url.origin === hosted.origin || url.protocol === 'data:'
+        || (url.protocol === 'blob:' && request.url.startsWith(`blob:${hosted.origin}/`));
+      await cdp.send(allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest',
+        { requestId, ...(allowed ? {} : { errorReason: 'BlockedByClient' }) });
+    });
+    cdp.on('Runtime.exceptionThrown', ({ exceptionDetails }) => errors.push(exceptionDetails.exception?.description ?? exceptionDetails.text));
+    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+    await cdp.send('Page.enable'); await cdp.send('Runtime.enable'); await cdp.send('Accessibility.enable');
+    await cdp.send('Network.enable'); await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
+    await cdp.send('Target.activateTarget', { targetId: page.id }); await cdp.send('Page.bringToFront');
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    const evaluate = async expression => {
+      const result = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+      assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails));
+      return result.result.value;
+    };
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+      window.__archiveInputs=[];
+      for(const type of ['click','keydown'])document.addEventListener(type,e=>{
+        if(e.target.closest?.('[data-works-stage]'))window.__archiveInputs.push({type,key:e.key,
+          trusted:e.isTrusted,cancelled:e.defaultPrevented,stage:e.target===document.querySelector('[data-works-stage]')});
+      });
+    ` });
+    const reduce = value => cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value }] });
+    const load = async motion => {
+      errors = [];
+      await reduce(motion === 'live' ? 'no-preference' : motion);
+      await cdp.send('Page.navigate', { url: hosted.origin });
+      await until(() => evaluate(`document.readyState==='complete' && Number(document.querySelector('[data-works-stage]')?.dataset.draws)>0`), 'measured real archive');
+      await evaluate(`document.fonts.ready`);
+      await evaluate(`Promise.all([...document.querySelectorAll('[data-hero-photo] img')].map(i=>i.decode()))`);
+      if (motion === 'live') { await reduce('reduce'); await delay(100); }
+      await evaluate(`scrollTo({top:0,behavior:'instant'})`);
+      await delay(200);
+    };
+    const key = async name => {
+      const code = { ArrowDown: 40, Home: 36 }[name];
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: name, code: name, windowsVirtualKeyCode: code });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: name, windowsVirtualKeyCode: code });
+    };
+    const settled = expected => until(() => evaluate(`Math.abs(Number(document.querySelector('[data-works-stage]').dataset.turn)-${expected})<.0005
+      && document.querySelector('[data-works-showcase]').dataset.mode==='${expected === 0 ? 'ring' : 'drum'}'`), `archive settled at ${expected}`);
+    const heading = async mode => {
+      const { nodes } = await cdp.send('Accessibility.getFullAXTree');
+      const primary = nodes.filter(n => !n.ignored && n.role?.value === 'heading'
+        && n.properties?.some(p => p.name === 'level' && p.value.value === 1));
+      const names = primary.map(n => n.name?.value);
+      t.diagnostic(`${mode} primary AX headings: ${JSON.stringify(names)}`);
+      assert.deepEqual(names, ['Aprende sobre Blockchain e Inteligencia Artificial'], `${mode}: one nonignored level-one AX heading`);
+      assert.equal(await evaluate(`document.querySelectorAll('h1').length===1
+        && document.querySelector('h1').id==='inicio-heading' && !document.querySelector('h1').closest('[inert],[aria-hidden="true"]')
+        && getComputedStyle(document.querySelector('h1')).visibility==='visible'`), true, 'original heading has no inaccessible ancestor');
+    };
+    const geometry = () => evaluate(`(()=>{const intro=document.querySelector('[data-hero-overlay]'),r=intro.getBoundingClientRect();
+      return {intro:{x:r.x,y:r.y,width:r.width,height:r.height},cards:[...document.querySelectorAll('[data-work-card]')]
+        .map(c=>({width:c.style.width,height:c.style.height,transform:c.style.transform,face:c.firstElementChild.style.transform}))};})()`);
+    const clean = () => { assert.deepEqual(errors, []); assert.deepEqual(cdp.errors, []); };
+
+    for (const motion of ['reduce', 'no-preference', 'live']) {
+      await t.test(`${motion}: original heading survives archive mode without changing geometry`, async () => {
+        await load(motion);
+        await heading('ring');
+        assert.equal(await evaluate(`getComputedStyle(document.querySelector('h1')).clipPath`), 'none', 'ring heading stays visually styled');
+        const before = await geometry();
+        await evaluate(`window.__archiveHeading=document.querySelector('h1');document.querySelector('[data-works-stage]').focus({preventScroll:true})`);
+        await key('ArrowDown'); await settled(1);
+        const drum = await geometry();
+        t.diagnostic(`${motion} geometry: ${JSON.stringify({before,drum})}`);
+        assert.deepEqual(drum.intro, before.intro, 'archive keeps intro measurement and physical placement');
+        await heading('drum');
+        assert.equal(await evaluate(`(()=>{const h=document.querySelector('h1'),intro=document.querySelector('[data-hero-overlay]');
+          return h===window.__archiveHeading && getComputedStyle(h).clipPath==='inset(50%)'
+            && [...intro.querySelectorAll('p,a')].every(e=>getComputedStyle(e).visibility==='hidden')
+            && [...intro.querySelectorAll('a')].every(a=>{a.focus({preventScroll:true});return !!a.closest('[inert]')&&document.activeElement!==a;});})()`), true,
+        'only nonheading intro content is hidden and actions cannot receive focus');
+        await key('Home'); await settled(0); await heading('after Home');
+        assert.deepEqual(await geometry(), before, 'Home restores the exact measured ring geometry');
+        assert.equal(await evaluate(`document.querySelector('h1')===window.__archiveHeading
+          && [...document.querySelectorAll('[data-hero-overlay] a')].every(a=>!a.closest('[inert]')&&getComputedStyle(a).visibility==='visible')`), true);
+        clean();
+      });
+      await t.test(`${motion}: trusted poster click gives the next arrow to the stage without scrolling`, async () => {
+        await load(motion);
+        const artwork = await evaluate(`(()=>{const links=[...document.querySelectorAll('[data-hero-photo]')];
+          for(const [index,a] of links.entries()) {if(index===links.length-1)break;
+            const r=a.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
+            if(y>90&&y<innerHeight&&a.contains(document.elementFromPoint(x,y)))return {x,y,index};}return null;})()`);
+        assert.ok(artwork, 'existing nonlast artwork anchor receives trusted mouse input');
+        const y = await evaluate('scrollY');
+        for (const type of ['mousePressed', 'mouseReleased']) await cdp.send('Input.dispatchMouseEvent',
+          { type, x: artwork.x, y: artwork.y, button: 'left', buttons: type === 'mousePressed' ? 1 : 0, clickCount: 1 });
+        await settled(artwork.index + 1);
+        assert.equal(await evaluate(`window.__archiveInputs.at(-1).trusted && window.__archiveInputs.at(-1).cancelled`), true);
+        // No focus() call is allowed between this native click and its next key.
+        const focused = await evaluate(`({stage:document.activeElement===document.querySelector('[data-works-stage]'),tag:document.activeElement.tagName,y:scrollY})`);
+        await key('ArrowDown');
+        const receipt = await evaluate('window.__archiveInputs.at(-1)');
+        t.diagnostic(`${motion} click focus / next key: ${JSON.stringify({artwork,focused,receipt})}`);
+        assert.equal(focused.stage, true, 'ordinary pointer selection must transfer focus from the anchor to the stage');
+        assert.deepEqual(receipt, {type:'keydown',key:'ArrowDown',trusted:true,cancelled:true,stage:true});
+        await settled(artwork.index + 2);
+        await until(() => evaluate(`document.querySelector('[aria-selected="true"]').dataset.workCard==='${artwork.index + 1}'`), 'selected React option committed after the trusted arrow');
+        assert.equal(await evaluate(`document.querySelector('[aria-selected="true"]').dataset.workCard`), String(artwork.index + 1));
+        assert.equal(focused.y, y); assert.equal(await evaluate('scrollY'), y, 'click focus and arrow prevent page scrolling');
+        clean();
+      });
+    }
+  } finally {
+    if (cdp) { try { await cdp.send('Browser.close'); } catch {} cdp.close(); }
+    if (browser.exitCode === null) browser.kill();
+    hosted.server.closeAllConnections(); await new Promise(done => hosted.server.close(done));
+  }
+});
+
 test('archive native input and hydration focus', { timeout: 150000 }, async (t) => {
   await access(temporary);
   await access(browserPath);
@@ -4330,7 +4465,10 @@ test('real browser verifies supplied works wheel, synchronized details and progr
       await evaluate(`document.querySelector('[data-works-stage]').focus({preventScroll:true})`);
       await key('ArrowDown');
       await wheelSelected(index);
-      assert.equal(await evaluate(`document.querySelector('[data-hero-overlay]').inert && getComputedStyle(document.querySelector('[data-hero-overlay]')).visibility === 'hidden'`), true, 'intro links inaccessible in drum');
+      assert.equal(await evaluate(`(()=>{const actions=document.querySelector('[data-hero-actions]');
+        return actions.inert && getComputedStyle(actions).visibility==='hidden'
+          && [...actions.querySelectorAll('a')].every(a=>{a.focus({preventScroll:true});return document.activeElement!==a;});})()`), true,
+      'intro actions remain hidden, inert and nonfocusable without hiding the primary heading');
     }
     // Geometry changes may alter layout only via separate details, never the H1.
     await capture('desktop-drum');

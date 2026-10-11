@@ -378,7 +378,10 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
                   if (!ready || event.defaultPrevented || event.button !== 0 || event.detail === 0
                     || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
                   event.preventDefault();
-                  if (!suppressClick.current) select(i + 1);
+                  if (!suppressClick.current) {
+                    stageRef.current?.focus({ preventScroll: true });
+                    select(i + 1);
+                  }
                 }}
                 className="absolute [backface-visibility:hidden]"
                 style={{ '--ring-angle': `${i * 360 / count}deg`,

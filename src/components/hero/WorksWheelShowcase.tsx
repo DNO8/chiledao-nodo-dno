@@ -51,10 +51,10 @@ export default function WorksWheelShowcase({ items }: { items: ShowcaseWork[] })
         [data-details-overlay].selected-details { position:absolute; z-index:10; right:24px; top:50%; transform:translateY(-50%); width:min(30%,26rem); }
         @media(max-width:899px) { [data-details-overlay].selected-details { right:16px; left:16px; top:auto; bottom:16px; transform:none; width:auto; } }
       `}</style>
-      <div ref={intro} data-hero-overlay inert={mode !== 'ring'}
+      <div ref={intro} data-hero-overlay
         className="pointer-events-none absolute z-10 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[min(66%,36rem)]"
-        style={{ visibility: mode === 'ring' ? 'visible' : 'hidden', top: '50%' }}>
-        <HeroIntro />
+        style={{ top: '50%' }}>
+        <HeroIntro inactive={mode !== 'ring'} />
       </div>
       <WorksWheel items={items} label="Chile DAO" action="Ver" introSize={introSize} showControls={false} detailsHeight={detailsHeight}
         onModeChange={changeMode} onActiveIndexChange={setActive} />
