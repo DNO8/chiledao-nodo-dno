@@ -212,6 +212,7 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
           card.style.marginLeft = `${-width / 2}px`;
           card.style.marginTop = `${-height / 2}px`;
           const culled = m > 0.5 && Math.abs(d) > CULL;
+          if (culled && card.contains(document.activeElement)) stageRef.current?.focus({ preventScroll: true });
           const angle = d * (360 / count);
           // A measured superellipse opens room for the intro on narrow screens.
           // The original ring -> bowed drum transform order remains underneath.

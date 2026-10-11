@@ -6,6 +6,7 @@ import { dirname, extname, join, resolve, sep } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import test from 'node:test';
+import { cleanupOwnedBrowser } from './helpers/browser-cleanup.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../dist');
 const temporary = join(tmpdir(), 'opencode');
@@ -61,9 +62,16 @@ async function staticServer() {
 async function connect(url) {
   const socket = new WebSocket(url);
   await new Promise((done, reject) => {
-    const timeout = setTimeout(() => reject(new Error('CDP WebSocket startup timed out')), 8000);
-    socket.addEventListener('open', () => { clearTimeout(timeout); done(); }, { once: true });
-    socket.addEventListener('error', () => { clearTimeout(timeout); reject(new Error('CDP WebSocket failed')); }, { once: true });
+    const retire = error => {
+      clearTimeout(timeout);
+      socket.removeEventListener('open', opened); socket.removeEventListener('error', failed);
+      if (error) { try { socket.close(); } catch {} reject(error); }
+      else done();
+    };
+    const opened = () => retire(), failed = () => retire(new Error('CDP WebSocket failed'));
+    const timeout = setTimeout(() => retire(new Error('CDP WebSocket startup timed out')), 8000);
+    socket.addEventListener('open', opened, { once: true });
+    socket.addEventListener('error', failed, { once: true });
   });
   let serial = 0;
   const pending = new Map();
@@ -105,6 +113,191 @@ async function connect(url) {
     },
   };
 }
+
+test('motion focus and cleanup regressions', { timeout: 150000 }, async (t) => {
+  await access(temporary); await access(browserPath);
+  const html = await readFile(join(root, 'index.html'), 'utf8');
+  const heroEntry = [...html.matchAll(/component-url="([^"]+)"/g)].map(m => m[1]).find(p => /WorksWheelShowcase\./.test(p));
+  assert.ok(heroEntry, 'actual built hero entry identified');
+  const hosted = await staticServer();
+  const profile = await mkdtemp(join(temporary, 'chiledao-motion-focus-profile-'));
+  const browser = spawn(browserPath, [
+    '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+    `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
+    '--disable-background-networking', '--disable-component-update', '--disable-sync',
+    '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
+  ], { stdio: 'ignore', windowsHide: true });
+  let cdp, gate = false, pendingEntry, primaryError;
+  const errors = [];
+  try {
+    const port = await until(async () => {
+      try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
+      catch { return false; }
+    }, 'owned motion/focus browser port', 15000);
+    const page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(p => p.type === 'page');
+    cdp = await connect(page.webSocketDebuggerUrl);
+    cdp.on('Fetch.requestPaused', async ({ requestId, request }) => {
+      const url = new URL(request.url);
+      if (gate && url.origin === hosted.origin && url.pathname === heroEntry) { pendingEntry = requestId; return; }
+      const allowed = url.origin === hosted.origin || url.protocol === 'data:'
+        || (url.protocol === 'blob:' && request.url.startsWith(`blob:${hosted.origin}/`));
+      await cdp.send(allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest',
+        { requestId, ...(allowed ? {} : { errorReason: 'BlockedByClient' }) });
+    });
+    cdp.on('Runtime.exceptionThrown', ({ exceptionDetails }) => errors.push(exceptionDetails.exception?.description ?? exceptionDetails.text));
+    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+    await cdp.send('Page.enable'); await cdp.send('Runtime.enable'); await cdp.send('Accessibility.enable');
+    await cdp.send('Network.enable'); await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
+    await cdp.send('Target.activateTarget', { targetId: page.id }); await cdp.send('Page.bringToFront');
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+      window.__motionInputs=[];window.__owner=null;
+      for(const type of ['pointerdown','pointermove','pointerup','wheel','keydown','click'])document.addEventListener(type,e=>{
+        if(type==='pointerdown'&&e.target.closest?.('.pl-root')&&!e.target.closest('.pl-bar')&&window.__owner===null)window.__owner=e.pointerId;
+        window.__motionInputs.push({type,trusted:e.isTrusted,cancelled:e.defaultPrevented});
+      });
+    ` });
+    const evaluate = async expression => {
+      const result = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+      assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails));
+      return result.result.value;
+    };
+    const reduce = value => cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value }] });
+    const load = async (motion = 'no-preference', delayed = false) => {
+      gate = delayed; pendingEntry = undefined;
+      await reduce(motion);
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+      await cdp.send('Page.navigate', { url: hosted.origin });
+      await until(() => evaluate(`document.readyState!=='loading'&&!!document.querySelector('[data-hero-photo]')`), 'parsed native hero');
+      if (delayed) await until(() => pendingEntry, 'actual delayed hero entry');
+      else await until(() => evaluate(`Number(document.querySelector('[data-works-stage]')?.dataset.draws)>0`), 'measured hero');
+    };
+    const key = async name => {
+      const code = { Enter: 13, ArrowRight: 39, ArrowLeft: 37, ArrowDown: 40, Home: 36, End: 35 }[name];
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: name, code: name, windowsVirtualKeyCode: code });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: name, windowsVirtualKeyCode: code });
+    };
+    const mouse = (type, point, held = false) => cdp.send('Input.dispatchMouseEvent', { type, ...point,
+      button: held || type !== 'mouseMoved' ? 'left' : 'none', buttons: held ? 1 : 0,
+      ...(type !== 'mouseMoved' ? { clickCount: 1 } : {}) });
+    const click = async selector => {
+      await evaluate(`document.querySelector(${JSON.stringify(selector)})?.scrollIntoView({block:'nearest',behavior:'instant'})`);
+      const point = await evaluate(`(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e)return null;
+        const r=e.getBoundingClientRect(),p={x:r.x+r.width/2,y:r.y+r.height/2};return e.contains(document.elementFromPoint(p.x,p.y))?p:null;})()`);
+      assert.ok(point, `native hit target ${selector}`);
+      await mouse('mousePressed', point, true); await mouse('mouseReleased', point);
+    };
+    const pose = () => evaluate(`(()=>{const r=document.querySelector('.pl-root');return {offset:Number(r.dataset.offset),
+      velocity:Number(r.dataset.velocity),draws:Number(r.dataset.draws),active:Number(r.dataset.active),reduced:r.dataset.reduced,
+      drag:r.dataset.drag,captured:r.hasPointerCapture(window.__owner??1),
+      transforms:[...r.querySelectorAll('.pl-card')].map(e=>e.style.transform)};})()`);
+    const angles = state => state.transforms.map(s => Number(s.match(/rotate\(([-.\d]+)rad\)/)?.[1] ?? NaN));
+    const idle = async () => {
+      await until(async () => { const before = await pose(); await delay(180); return (await pose()).draws === before.draws; }, 'finite user settlement ends idle frames', 12000);
+      const before = await pose(); await delay(300); assert.deepEqual(await pose(), before, 'no idle pose writes'); return before;
+    };
+    const formation = async () => {
+      await evaluate(`document.querySelector('[data-formation-polaroid]').scrollIntoView({block:'center',behavior:'instant'})`);
+      await until(() => evaluate(`document.querySelector('.pl-root')?.dataset.draws>0`), 'visible enhanced formation');
+    };
+    const clean = () => { assert.deepEqual(errors, []); assert.deepEqual(cdp.errors, []); };
+
+    await t.test('local pause is accessible and stops autonomous frames without reducing manual physics', async () => {
+      await load(); await formation();
+      const control = await evaluate(`(()=>{const b=document.querySelector('.pl-pause');return b&&{tag:b.tagName,
+        pressed:b.getAttribute('aria-pressed'),label:b.getAttribute('aria-label'),width:b.offsetWidth,height:b.offsetHeight};})()`);
+      assert.ok(control, 'continuous autonomous breeze needs an accessible local pause control');
+      assert.deepEqual(control, { tag: 'BUTTON', pressed: 'false', label: 'Pausar movimiento automático', width: 44, height: 44 });
+      const ax = (await cdp.send('Accessibility.getFullAXTree')).nodes;
+      assert.ok(ax.some(n => !n.ignored && n.role?.value === 'button' && n.name?.value === control.label));
+      await click('.pl-pause');
+      assert.equal(await evaluate(`document.querySelector('.pl-pause').getAttribute('aria-pressed')`), 'true');
+      assert.equal((await idle()).reduced, 'false', 'user pause is not system reduced motion');
+      const p = await evaluate(`(()=>{const r=document.querySelector('.pl-root').getBoundingClientRect();return {x:r.left+r.width*.65,y:r.top+110};})()`);
+      const start = await pose(); await mouse('mousePressed', p, true);
+      await mouse('mouseMoved', { x: p.x - 40, y: p.y }, true); await delay(40);
+      const held = await pose(); assert.equal(held.drag, '1'); assert.equal(held.captured, true);
+      assert.ok(Math.abs(held.offset - start.offset - 40) < .2); assert.notDeepEqual(held.transforms, start.transforms);
+      // Native keyboard activation while the real pointer remains captured must
+      // not rebuild the controller or give a foreign pointer gesture ownership.
+      await evaluate(`document.querySelector('.pl-pause').focus({preventScroll:true})`); await key('Enter');
+      assert.equal((await pose()).captured, true); await key('Enter'); assert.equal((await pose()).captured, true);
+      await evaluate(`document.querySelector('.pl-pause').dispatchEvent(new PointerEvent('pointerdown',
+        {bubbles:true,pointerId:77,pointerType:'touch',button:0,buttons:1}))`);
+      assert.equal((await pose()).captured, true);
+      await mouse('mouseMoved', { x: p.x - 100, y: p.y }, true); await delay(20);
+      const moving = await pose(); assert.ok(Math.abs(moving.offset - start.offset - 100) < .2);
+      assert.ok(angles(moving).some(a => Number.isFinite(a) && Math.abs(a) > .001), 'normal velocity-driven pendulum remains');
+      await mouse('mouseReleased', { x: p.x - 100, y: p.y });
+      const released = await pose(); await delay(100); const inertia = await pose();
+      assert.equal(inertia.drag, '0'); assert.equal(inertia.captured, false);
+      assert.ok(Math.abs(released.velocity) > 1 || Math.abs(inertia.velocity) > 1, 'normal release velocity is retained');
+      assert.notEqual(inertia.offset, moving.offset, 'release spring continues after manual pointer ends');
+      const rested = await idle();
+      await evaluate(`document.querySelector('.pl-root').focus({preventScroll:true})`); await key('Home');
+      const navigating = await pose(); assert.ok(navigating.offset > 1, 'paused normal keyboard navigation is a spring, not a reduced-motion jump');
+      await idle(); assert.equal((await pose()).active, 0);
+      await click('.pl-next'); await idle(); assert.equal((await pose()).active, 1);
+      await click('.pl-pause'); const resumed = await pose(); await delay(400);
+      assert.ok((await pose()).draws > resumed.draws); assert.notDeepEqual((await pose()).transforms, resumed.transforms, 'original ambient breeze resumes');
+      t.diagnostic(`Paused normal physics: ${JSON.stringify({held,moving,released,inertia,rested,navigating})}`); clean();
+    });
+
+    await t.test('pause choice survives resize offscreen and initial/live system motion preferences', async () => {
+      await load('reduce'); await formation(); await click('.pl-pause');
+      assert.ok(angles(await idle()).every(a => a === 0), 'initial system reduction clears every angle');
+      await reduce('no-preference'); await idle(); assert.equal((await pose()).reduced, 'false');
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width: 768, height: 900, deviceScaleFactor: 1, mobile: false });
+      await formation(); await idle();
+      assert.equal(await evaluate(`document.querySelector('.pl-pause').getAttribute('aria-pressed')`), 'true');
+      await click('.pl-pause');
+      await evaluate(`scrollTo({top:0,behavior:'instant'})`); await delay(250); await idle();
+      await formation(); const visible = await pose(); await delay(200); assert.ok((await pose()).draws > visible.draws);
+      await reduce('reduce'); await formation();
+      await until(() => evaluate(`!document.querySelector('[data-timeline]').dataset.enhanced`), 'timeline completes live native-layout restoration');
+      await formation();
+      await until(async () => (await pose()).reduced === 'true', 'live system reduction wins over resumed breeze');
+      assert.ok(angles(await idle()).every(a => a === 0));
+      await click('.pl-pause'); await reduce('no-preference'); await formation(); await idle();
+      assert.equal(await evaluate(`document.querySelector('.pl-pause').getAttribute('aria-pressed')`), 'true'); clean();
+    });
+
+    const focusedHero = async () => {
+      await load('reduce', true);
+      await evaluate(`window.__artwork=document.querySelectorAll('[data-hero-photo]')[3];window.__artwork.focus({preventScroll:true})`);
+      gate = false; await cdp.send('Fetch.continueRequest', { requestId: pendingEntry }); pendingEntry = undefined;
+      await until(() => evaluate(`Number(document.querySelector('[data-works-stage]')?.dataset.draws)>0`), 'real delayed hydration retains visible SSR link');
+      assert.equal(await evaluate(`document.activeElement===window.__artwork&&window.__artwork.closest('[data-work-card]').style.opacity==='1'`), true);
+    };
+    const wheel = async deltaY => {
+      const hit = await evaluate(`(()=>{const s=document.querySelector('[data-works-stage]'),r=s.getBoundingClientRect();
+        for(let y=Math.max(90,r.top+20);y<Math.min(innerHeight-20,r.bottom);y+=20)
+          for(let x=r.left+20;x<r.right-20;x+=20)if(s.contains(document.elementFromPoint(x,y)))return {x,y};return null;})()`);
+      assert.ok(hit); await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', ...hit, deltaX: 0, deltaY }); await delay(350);
+    };
+    await t.test('trusted culling transfers only owned hidden focus to stage without scrolling', async () => {
+      await focusedHero(); const before = await evaluate('scrollY');
+      await wheel(120);
+      assert.equal(await evaluate(`window.__artwork.closest('[data-work-card]').style.opacity`), '0');
+      assert.equal(await evaluate(`document.activeElement===document.querySelector('[data-works-stage]')`), true, 'handoff before hiding owned focused link');
+      assert.equal(await evaluate('scrollY'), before);
+      await key('ArrowDown');
+      await until(() => evaluate(`document.querySelector('[data-works-stage]').dataset.turn==='2'`), 'stage keyboard works after cull');
+      assert.equal(await evaluate(`document.querySelector('[aria-selected="true"]').style.opacity`), '1');
+      assert.equal(await evaluate(`window.__motionInputs.filter(r=>r.type==='wheel').every(r=>r.trusted&&r.cancelled)`), true); clean();
+    });
+    await t.test('visible retained link Enter remains native and outside focus is never acquired', async () => {
+      await focusedHero(); const href = await evaluate('window.__artwork.href'); await key('Enter');
+      await until(async () => (await cdp.send('Page.getFrameTree')).frameTree.frame.url === href, 'native retained link opens original URL');
+      assert.equal(await evaluate('document.querySelector("img")?.src'), href);
+      await load('reduce'); await evaluate(`window.__outside=document.querySelector('a[href="#contacto"]');window.__outside.focus({preventScroll:true})`);
+      await wheel(120); assert.equal(await evaluate('document.activeElement===window.__outside'), true); clean();
+    });
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp, server: hosted.server, primaryError,
+      report: result => t.diagnostic(`Owned motion/focus cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}`) });
+  }
+});
 
 test('interaction continuity regressions', { timeout: 150000 }, async (t) => {
   await access(temporary);
@@ -3284,6 +3477,7 @@ test('hero decoded image fade entrance', { timeout: 120000 }, async (t) => {
   const interceptionTrace = [];
   const requests = new Map();
   const ownedCallbacks = new Set();
+  let primaryError;
   try {
     const port = await until(async () => {
       try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
@@ -3501,16 +3695,15 @@ test('hero decoded image fade entrance', { timeout: 120000 }, async (t) => {
     assert.equal(await evaluate(`(() => {const p=document.querySelectorAll('[data-hero-photo]')[6],i=p.querySelector('img');return i.complete&&i.naturalWidth===0&&!!i.alt&&p.getAttribute('href').startsWith('/_astro/')&&getComputedStyle(p).opacity==='1'})()`), true, 'broken image retains visible alt and original artwork link');
     await drain();
     assert.deepEqual(cdp.errors, []);
-  } finally {
-    t.diagnostic(`Interception trace: ${JSON.stringify(interceptionTrace.filter(row => row.event === 'document' || /\/(vendimiatech-chiledao|sub0-chiledao)\./.test(row.url ?? '')))}`);
-    try {
-      if (drain) await drain();
-    } finally {
-      if (cdp) { await cdp.send('Browser.close').catch(() => {}); cdp.close(); }
-      await new Promise(done => { if (browser.exitCode !== null) done(); else browser.once('exit', done); });
-      await new Promise(done => hosted.server.close(done));
-      t.diagnostic(`Cleanup: owned fade browser exited=${browser.exitCode !== null}; server closed=${!hosted.server.listening}; profile retained=${profile}`);
-    }
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp, server: hosted.server, primaryError,
+      diagnostics: async () => {
+        t.diagnostic(`Interception trace: ${JSON.stringify(interceptionTrace.filter(row => row.event === 'document' || /\/(vendimiatech-chiledao|sub0-chiledao)\./.test(row.url ?? '')))}`);
+        if (drain) await drain();
+      },
+      report: result => t.diagnostic(`Cleanup: owned fade browser exited=${result.exited}; server closed=${!hosted.server.listening}; errors=${result.errors.map(e => e.message).join('; ')}; profile retained=${profile}`),
+    });
   }
 });
 
@@ -3528,6 +3721,7 @@ test('timeline modal declaration ownership', { timeout: 90000 }, async (t) => {
   let cdp;
   let evaluate;
   let ownershipPassed = false;
+  let primaryError;
   try {
     const port = await until(async () => {
       try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
@@ -3687,23 +3881,25 @@ test('timeline modal declaration ownership', { timeout: 90000 }, async (t) => {
     assert.deepEqual(cdp.errors, []);
     assert.deepEqual(await evaluate('window.declarationErrors'), []);
     ownershipPassed = true;
-  } finally {
-    if (evaluate) {
-      const trace = await evaluate(`window.refreshTrace.filter(row=>row.time>=window.refreshTrace.find(row=>row.event==='fixture')?.time)`);
-      const counts = trace.reduce((counts, row) => {
-        counts[row.event] = (counts[row.event] ?? 0) + 1;
-        return counts;
-      }, {});
-      t.diagnostic(`Refresh transaction summary: ${JSON.stringify({passed:ownershipPassed,counts})}`);
-      if (!ownershipPassed) for (const row of trace.slice(-160)) {
-        // One event per line keeps the causal order readable after a failure.
-        t.diagnostic(`Refresh transaction: ${JSON.stringify(row)}`);
-      }
-    }
-    if (cdp) { await cdp.send('Browser.close').catch(() => {}); cdp.close(); }
-    await new Promise(done => { if (browser.exitCode !== null) done(); else browser.once('exit', done); });
-    await new Promise(done => hosted.server.close(done));
-    t.diagnostic(`Cleanup: owned declaration browser exited=${browser.exitCode !== null}; server closed=${!hosted.server.listening}; profile retained=${profile}`);
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp, server: hosted.server, primaryError,
+      diagnostics: async () => {
+        if (evaluate) {
+          const trace = await evaluate(`window.refreshTrace.filter(row=>row.time>=window.refreshTrace.find(row=>row.event==='fixture')?.time)`);
+          const counts = trace.reduce((counts, row) => {
+            counts[row.event] = (counts[row.event] ?? 0) + 1;
+            return counts;
+          }, {});
+          t.diagnostic(`Refresh transaction summary: ${JSON.stringify({passed:ownershipPassed,counts})}`);
+          if (!ownershipPassed) for (const row of trace.slice(-160)) {
+            // One event per line keeps the causal order readable after a failure.
+            t.diagnostic(`Refresh transaction: ${JSON.stringify(row)}`);
+          }
+        }
+      },
+      report: result => t.diagnostic(`Cleanup: owned declaration browser exited=${result.exited}; server closed=${!hosted.server.listening}; errors=${result.errors.map(e => e.message).join('; ')}; profile retained=${profile}`),
+    });
   }
 });
 
@@ -3722,6 +3918,7 @@ test('hero hard-refresh firstpaint', { timeout: 120000 }, async (t) => {
   let hold = true;
   let abort = false;
   const paused = [];
+  let primaryError;
   try {
     const port = await until(async () => {
       try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
@@ -3942,13 +4139,10 @@ test('hero hard-refresh firstpaint', { timeout: 120000 }, async (t) => {
       await cdp.send('Emulation.setScriptExecutionDisabled', { value: false });
     }
     assert.deepEqual(cdp.errors, []);
-  } finally {
-    if (cdp) {
-      await cdp.send('Browser.close').catch(() => {});
-      cdp.close();
-    }
-    await new Promise(done => { if (browser.exitCode !== null) done(); else browser.once('exit', done); });
-    await new Promise(done => hosted.server.close(done));
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, cdp, server: hosted.server, primaryError,
+      report: result => t.diagnostic(`Cleanup: owned loading browser exited=${result.exited}; server closed=${!hosted.server.listening}; errors=${result.errors.map(e => e.message).join('; ')}`) });
     // Profiles and captures stay in the approved evidence directory; no ambient browser state is touched.
   }
 });

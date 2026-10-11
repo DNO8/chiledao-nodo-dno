@@ -98,6 +98,8 @@ export default function PolaroidLineCarousel({
   const n = slides.length;
   const initial = clamp(initialIndex, 0, Math.max(0, n - 1));
   const [active, setActive] = React.useState(initial), [dragging, setDragging] = React.useState(false);
+  const [paused, setPaused] = React.useState(false);
+  const pause = React.useRef(false), reconcileMotion = React.useRef<() => void>(() => {});
   const [size, setSize] = React.useState({ w: 520, h: 540, cw: cardWidth });
   const rootRef = React.useRef<HTMLDivElement>(null), pathRef = React.useRef<SVGPathElement>(null);
   const barRef = React.useRef<HTMLDivElement>(null);
@@ -188,6 +190,12 @@ export default function PolaroidLineCarousel({
         [S.off, S.vel] = springStep(S.off, S.vel, S.target, dt);
         lineVel = -(S.off - before) / Math.max(dt, 1e-3);
       }
+      // A local pause removes autonomous forcing, not the manual spring model.
+      // Retire its finite tail only below subpixel/angular rendering precision.
+      if (pause.current && !d?.moved && Math.abs(S.target - S.off) < .02 && Math.abs(S.vel) < .1) {
+        S.off = S.target; S.vel = 0;
+      }
+      let moving = !!d?.moved || Math.abs(S.target - S.off) >= .02 || Math.abs(S.vel) >= .1;
       const o = opts.current, g = reduce ? 0 : o.swing, near = nearestAt(S.off, spacing, n);
       for (let i = 0; i < n; i++) {
         const el = cards.current[i];
@@ -201,8 +209,10 @@ export default function PolaroidLineCarousel({
         if (reduce) { a = 0; av = 0; }
         else {
           [a, av] = swingStep(a, av, lineVel, dt, g);
-          if (g) a += Math.sin(now / 1300 + i * 1.7) * .0009 * g;
+          if (g && !pause.current) a += Math.sin(now / 1300 + i * 1.7) * .0009 * g;
+          if (pause.current && Math.abs(a) < .00005 && Math.abs(av) < .0002) { a = 0; av = 0; }
         }
+        moving ||= a !== 0 || av !== 0;
         S.a[i] = a; S.w[i] = av;
         const y = stringY(x, w, y0, o.sag) - 6;
         el.style.transform = 'translate(' + (x - cw / 2).toFixed(1) + 'px,' + y.toFixed(1) + 'px) rotate(' + a.toFixed(4) + 'rad)';
@@ -214,7 +224,7 @@ export default function PolaroidLineCarousel({
       root.dataset.draws = String(Number(root.dataset.draws ?? 0) + 1);
       root.dataset.reduced = String(reduce);
       if (near !== activeRef.current) { activeRef.current = near; setActive(near); }
-      if (!reduce) raf = requestAnimationFrame(frame);
+      if (!reduce && (!pause.current || moving)) raf = requestAnimationFrame(frame);
     };
     const stop = () => { cancelAnimationFrame(raf); raf = 0; clearInterval(timer); timer = 0; };
     const start = () => {
@@ -222,11 +232,12 @@ export default function PolaroidLineCarousel({
       if (!canRun()) return;
       if (reduced.current) frame(prev);
       else raf = requestAnimationFrame(frame);
-      if (autoplay && n > 1 && !reduced.current) timer = window.setInterval(() => {
+      if (autoplay && n > 1 && !reduced.current && !pause.current) timer = window.setInterval(() => {
         if (!canRun() || drag.current || performance.now() - lastTouch.current < autoplay) return;
         goTo(activeRef.current >= n - 1 ? 0 : activeRef.current + 1);
       }, autoplay);
     };
+    reconcileMotion.current = start;
     wake.current = () => {
       if (!canRun()) return;
       if (reduced.current) frame(performance.now());
@@ -243,7 +254,7 @@ export default function PolaroidLineCarousel({
     io.observe(root); readMotion();
     return () => {
       stop(); io.disconnect();
-      release(); wake.current = () => {};
+      release(); wake.current = () => {}; reconcileMotion.current = () => {};
       query.removeEventListener('change', readMotion);
       document.removeEventListener('visibilitychange', readVisibility);
     };
@@ -295,7 +306,7 @@ export default function PolaroidLineCarousel({
     if (off < 0) off *= .35;
     if (off > max) off = max + (off - max) * .35;
     sim.current.off = off;
-    if (reduced.current) wake.current();
+    wake.current();
   };
   const onUp = (e: React.PointerEvent | PointerEvent) => {
     const d = drag.current;
@@ -342,6 +353,11 @@ export default function PolaroidLineCarousel({
     <div ref={barRef} className="pl-bar">
       <div className="pl-cap" key={active} aria-hidden="true"><span className="pl-title">{s?.title}</span><span className="pl-sub">{s?.caption}</span></div>
       <span className="pl-count" aria-hidden="true"><b>{pad2(active + 1)}</b> / {pad2(n)}</span>
+      <button type="button" className="pl-btn pl-pause" aria-pressed={paused}
+        aria-label={paused ? 'Reanudar movimiento automático' : 'Pausar movimiento automático'}
+        onClick={() => { pause.current = !pause.current; setPaused(pause.current); reconcileMotion.current(); }}>
+        <span aria-hidden="true">{paused ? '▶' : 'Ⅱ'}</span>
+      </button>
       <button type="button" className="pl-btn pl-prev" disabled={active === 0} aria-label="Foto anterior" onClick={() => step(-1)}>←</button>
       <button type="button" className="pl-btn pl-next" disabled={active === n - 1} aria-label="Foto siguiente" onClick={() => step(1)}>→</button>
     </div>
