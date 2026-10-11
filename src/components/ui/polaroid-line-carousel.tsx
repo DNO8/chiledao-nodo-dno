@@ -314,6 +314,7 @@ export default function PolaroidLineCarousel({
   };
   const step = (dir: number) => { lastTouch.current = performance.now(); goTo(clamp(activeRef.current + dir, 0, n - 1)); };
   const onKey = (e: React.KeyboardEvent) => {
+    if (e.defaultPrevented || e.altKey || e.ctrlKey || e.metaKey || e.shiftKey) return;
     if (e.key === 'ArrowRight') step(1);
     else if (e.key === 'ArrowLeft') step(-1);
     else if (e.key === 'Home') goTo(0);

@@ -511,6 +511,178 @@ test('works wheel zoom and archive keyboard navigation', { timeout: 150000 }, as
   }
 });
 
+test('archive native input and hydration focus', { timeout: 150000 }, async (t) => {
+  await access(temporary);
+  await access(browserPath);
+  const html = await readFile(join(root, 'index.html'), 'utf8');
+  const modulePath = [...html.matchAll(/component-url="([^"]+)"/g)].map(m => m[1])
+    .find(path => /WorksWheelShowcase\./.test(path));
+  assert.ok(modulePath, 'actual hero entry identified');
+  const hosted = await staticServer();
+  const profile = await mkdtemp(join(temporary, 'chiledao-native-input-profile-'));
+  const browser = spawn(browserPath, [
+    '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+    `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
+    '--disable-background-networking', '--disable-component-update', '--disable-sync',
+    '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
+  ], { stdio: 'ignore', windowsHide: true });
+  let cdp, browserCdp, gate = false, pendingEntry, errors = [];
+  try {
+    const port = await until(async () => {
+      try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
+      catch { return false; }
+    }, 'owned native-input browser port', 15000);
+    const page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(p => p.type === 'page');
+    cdp = await connect(page.webSocketDebuggerUrl);
+    const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+    browserCdp = await connect(version.webSocketDebuggerUrl);
+    const intercept = client => async ({ requestId, request }, sessionId) => {
+      const url = new URL(request.url);
+      if (!sessionId && gate && url.origin === hosted.origin && url.pathname === modulePath) {
+        pendingEntry = requestId; return;
+      }
+      const allowed = url.origin === hosted.origin || url.protocol === 'data:'
+        || (url.protocol === 'blob:' && request.url.startsWith(`blob:${hosted.origin}/`));
+      await client.send(allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest',
+        { requestId, ...(allowed ? {} : { errorReason: 'BlockedByClient' }) }, sessionId);
+    };
+    cdp.on('Fetch.requestPaused', intercept(cdp));
+    browserCdp.on('Fetch.requestPaused', intercept(browserCdp));
+    // Pause owned popup targets before navigation so their requests use the same isolation policy.
+    browserCdp.on('Target.attachedToTarget', async ({ sessionId, targetInfo }) => {
+      if (targetInfo.targetId !== page.id) await browserCdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] }, sessionId);
+      await browserCdp.send('Runtime.runIfWaitingForDebugger', {}, sessionId);
+    });
+    cdp.on('Runtime.exceptionThrown', ({ exceptionDetails }) => errors.push(exceptionDetails.exception?.description ?? exceptionDetails.text));
+    await browserCdp.send('Target.setAutoAttach', { autoAttach: true, waitForDebuggerOnStart: true, flatten: true });
+    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+    await cdp.send('Page.enable'); await cdp.send('Runtime.enable');
+    await cdp.send('Network.enable'); await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    const evaluate = async expression => {
+      const result = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+      assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails));
+      return result.result.value;
+    };
+    await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+      window.__nativeRows=[];
+      for(const type of ['click','keydown'])document.addEventListener(type,e=>{
+        window.__nativeRows.push({type,key:e.key,trusted:e.isTrusted,cancelled:e.defaultPrevented,
+          detail:e.detail,ctrl:e.ctrlKey,shift:e.shiftKey});
+      });
+    ` });
+    const key = async (name, extra = {}) => {
+      const code = { Home: 36, End: 35, Enter: 13, ArrowRight: 39, ArrowLeft: 37 }[name];
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: name, code: name,
+        windowsVirtualKeyCode: code, ...extra });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: name, windowsVirtualKeyCode: code });
+    };
+    const load = async (delayed = false) => {
+      gate = delayed; pendingEntry = undefined; errors = [];
+      await cdp.send('Target.activateTarget', { targetId: page.id }); await cdp.send('Page.bringToFront');
+      await cdp.send('Page.navigate', { url: hosted.origin });
+      await until(() => evaluate(`document.readyState!=='loading' && !!document.querySelector('[data-hero-photo]')`), 'parsed hero links');
+      if (delayed) await until(() => pendingEntry, 'actual hero module delivery paused');
+      else await until(() => evaluate(`Number(document.querySelector('[data-works-stage]')?.dataset.draws)>0`), 'measured hydrated hero');
+    };
+    const turn = () => evaluate(`Number(document.querySelector('[data-works-stage]').dataset.turn)`);
+    const url = async () => (await cdp.send('Page.getFrameTree')).frameTree.frame.url;
+    const popups = async () => (await browserCdp.send('Target.getTargets')).targetInfos.filter(p => p.targetId !== page.id && p.type === 'page');
+    const clean = () => { assert.deepEqual(errors, []); assert.deepEqual(cdp.errors, []); assert.deepEqual(browserCdp.errors, []); };
+
+    for (const [label, modifiers] of [['Ctrl', 2], ['Shift', 8]]) await t.test(`${label} click opens native image target without selection`, async () => {
+      await load();
+      const artwork = await evaluate(`(async()=>{for(const a of document.querySelectorAll('[data-hero-photo]')){
+        await a.querySelector('img').decode();const r=a.getBoundingClientRect(),x=r.x+r.width/2,y=r.y+r.height/2;
+        if(y>0&&y<innerHeight&&a.contains(document.elementFromPoint(x,y)))return {x,y,href:a.href};}return null;})()`);
+      assert.ok(artwork, 'native pointer hit-tests an artwork link');
+      const before = await turn();
+      try {
+        for (const type of ['mousePressed', 'mouseReleased']) await cdp.send('Input.dispatchMouseEvent',
+          { type, x: artwork.x, y: artwork.y, button: 'left', buttons: type === 'mousePressed' ? 1 : 0, clickCount: 1, modifiers });
+        await delay(200);
+        const receipt = await evaluate(`window.__nativeRows.filter(r=>r.type==='click').at(-1)`);
+        t.diagnostic(`${label} click receipt: ${JSON.stringify(receipt)}; turn ${before} -> ${await turn()}`);
+        assert.equal(receipt.trusted, true); assert.equal(receipt.cancelled, false);
+        assert.equal(await turn(), before, 'modified click cannot select a card');
+        const target = await until(async () => (await popups()).find(p => p.url === artwork.href), 'native image popup URL');
+        const attached = await cdp.send('Target.attachToTarget', { targetId: target.targetId, flatten: true });
+        const image = await cdp.send('Runtime.evaluate', { expression: 'document.querySelector("img")?.src', returnByValue: true }, attached.sessionId);
+        assert.equal(image.result.value, artwork.href, 'popup displays the actual local image');
+        assert.equal(await url(), hosted.origin+'/'); clean();
+      } finally {
+        for (const target of await popups()) await cdp.send('Target.closeTarget', { targetId: target.targetId });
+      }
+    });
+
+    await t.test('SSR focused artwork keeps its identity and native Enter after real hydration', async () => {
+      await load(true);
+      const focused = await evaluate(`(()=>{const a=document.querySelectorAll('[data-hero-photo]')[3];
+        a.focus({preventScroll:true});window.__focusedArtwork=a;return {href:a.href,focused:document.activeElement===a,tab:a.tabIndex};})()`);
+      assert.equal(focused.focused, true); assert.equal(focused.tab, 0);
+      gate = false; await cdp.send('Fetch.continueRequest', { requestId: pendingEntry }); pendingEntry = undefined;
+      await until(() => evaluate(`Number(document.querySelector('[data-works-stage]')?.dataset.draws)>0`), 'released real hero hydration');
+      assert.equal(await evaluate('document.activeElement===window.__focusedArtwork'), true, 'hydration does not steal or replace SSR focus');
+      assert.equal(await evaluate('document.activeElement.href'), focused.href);
+      assert.equal(await evaluate('document.activeElement.tabIndex'), -1);
+      await key('Enter'); await delay(200);
+      t.diagnostic(`Retained focus Enter URL: ${await url()}; expected ${focused.href}`);
+      assert.equal(await url(), focused.href, 'trusted Enter opens originally focused artwork, not selected artwork');
+      assert.equal(await evaluate('document.querySelector("img")?.src'), focused.href); clean();
+    });
+
+    await t.test('formation pre-cancelled keys leave the photo unchanged', async () => {
+      await load();
+      await evaluate(`document.querySelector('[data-formation-polaroid]').scrollIntoView({block:'center',behavior:'instant'})`);
+      await until(() => evaluate(`document.querySelector('.pl-root')?.dataset.draws>0`), 'formation hydrated for cancellation probe');
+      // Controlled cancellation is intentionally separate from native input evidence.
+      await evaluate(`(()=>{const r=document.querySelector('.pl-root');
+        const e=new KeyboardEvent('keydown',{key:'End',bubbles:true,cancelable:true});e.preventDefault();r.dispatchEvent(e);})()`);
+      await delay(200);
+      assert.equal(await evaluate(`Number(document.querySelector('.pl-root').dataset.active)`), 0);
+      clean();
+    });
+
+    await t.test('formation document shortcuts remain native and ordinary repeated navigation works', async () => {
+      await load();
+      await evaluate(`document.querySelector('[data-formation-polaroid]').scrollIntoView({block:'center',behavior:'instant'})`);
+      await until(() => evaluate(`document.querySelector('.pl-root')?.dataset.draws>0`), 'formation hydrated');
+      await evaluate(`document.querySelector('.pl-root').focus({preventScroll:true})`);
+      const active = () => evaluate(`Number(document.querySelector('.pl-root').dataset.active)`);
+      await key('ArrowRight'); await until(async () => await active() === 1, 'ordinary next photo');
+      for (const name of ['End', 'Home']) {
+        await evaluate(`scrollTo({top:800,behavior:'instant'})`);
+        await key(name, { modifiers: 2 }); await delay(350);
+        const receipt = await evaluate(`window.__nativeRows.filter(r=>r.type==='keydown').at(-1)`);
+        t.diagnostic(`Ctrl+${name}: ${JSON.stringify(receipt)}; photo ${await active()}; scroll ${await evaluate('scrollY')}`);
+        assert.equal(receipt.trusted, true); assert.equal(receipt.cancelled, false);
+        assert.equal(await active(), 1, 'document shortcut cannot change photo');
+        assert.equal(await evaluate(name === 'Home' ? 'scrollY===0' : 'scrollY+innerHeight>=document.documentElement.scrollHeight-1'), true);
+      }
+      for (const name of ['Home', 'End', 'ArrowRight', 'ArrowLeft']) for (const modifiers of [1, 2, 4, 8]) {
+        await key(name, { modifiers }); await delay(30);
+        assert.equal(await evaluate(`window.__nativeRows.at(-1).cancelled`), false);
+        assert.equal(await active(), 1);
+      }
+      // Controlled pre-cancelled events are contract probes, not trusted native input.
+      await evaluate(`(()=>{const r=document.querySelector('.pl-root');for(const key of ['Home','End','ArrowRight','ArrowLeft']){
+        const e=new KeyboardEvent('keydown',{key,bubbles:true,cancelable:true});e.preventDefault();r.dispatchEvent(e);}})()`);
+      await delay(100); assert.equal(await active(), 1);
+      await evaluate(`document.querySelector('.pl-root').scrollIntoView({block:'center',behavior:'instant'})`);
+      await key('ArrowRight', { autoRepeat: true }); await until(async () => await active() === 2, 'held-arrow repeat remains usable');
+      await key('ArrowLeft'); await until(async () => await active() === 1, 'ordinary previous photo');
+      await key('End'); await until(async () => await active() === 5, 'ordinary last photo');
+      await key('Home'); await until(async () => await active() === 0, 'ordinary first photo'); clean();
+    });
+  } finally {
+    if (browserCdp) browserCdp.close();
+    if (cdp) { try { await cdp.send('Browser.close'); } catch {} cdp.close(); }
+    if (browser.exitCode === null) browser.kill();
+    hosted.server.closeAllConnections(); await new Promise(done => hosted.server.close(done));
+  }
+});
+
 test('works wheel input ownership', { timeout: 150000 }, async (t) => {
   await access(temporary);
   await access(browserPath);

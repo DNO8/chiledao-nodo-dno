@@ -370,7 +370,12 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
               <div key={item.id} id={`${id}-work-${i}`} role={ready ? 'option' : undefined} aria-selected={ready ? i === active : undefined}
                 aria-label={item.title} data-work-card={i}
                 ref={node => { cardRefs.current[i] = node; }}
-                onClick={() => { if (!suppressClick.current) select(i + 1); }}
+                onClick={event => {
+                  if (!ready || event.defaultPrevented || event.button !== 0 || event.detail === 0
+                    || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+                  event.preventDefault();
+                  if (!suppressClick.current) select(i + 1);
+                }}
                 className="absolute [backface-visibility:hidden]"
                 style={{ '--ring-angle': `${i * 360 / count}deg`,
                   '--ring-x-factor': Math.sign(Math.sin(rad(i * 360 / count))) * Math.abs(Math.sin(rad(i * 360 / count))) ** .5,
@@ -379,7 +384,7 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
                 } as React.CSSProperties}>
                 <span data-work-face className="relative block size-full overflow-hidden rounded-lg bg-transparent">
                   <a data-hero-photo href={item.image} draggable={false} aria-label={`${item.title} · Afiche de archivo`}
-                    tabIndex={ready ? -1 : 0} onClick={event => { if (ready) event.preventDefault(); }}
+                    tabIndex={ready ? -1 : 0}
                     className="block size-full">
                   <picture className="block size-full">
                     <source type="image/avif" srcSet={item.avif} sizes="(min-width: 900px) 58vw, 88vw" />
