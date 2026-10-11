@@ -106,6 +106,249 @@ async function connect(url) {
   };
 }
 
+test('polaroid gesture ownership and hydration sizing', { timeout: 150000 }, async (t) => {
+  await access(temporary);
+  await access(browserPath);
+  const html = await readFile(join(root, 'index.html'), 'utf8');
+  const modulePath = [...html.matchAll(/component-url="([^"]+)"/g)].map(m => m[1])
+    .find(path => /FormationPolaroid\./.test(path));
+  assert.ok(modulePath, 'exact built formation entry identified');
+  const hosted = await staticServer();
+  const profile = await mkdtemp(join(temporary, 'chiledao-polaroid-profile-'));
+  const browser = spawn(browserPath, [
+    '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+    `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
+    '--disable-background-networking', '--disable-component-update', '--disable-sync',
+    '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
+  ], { stdio: 'ignore', windowsHide: true });
+  let cdp, injection, gate = false, pendingEntry, receipts = [], errors = [];
+  try {
+    const port = await until(async () => {
+      try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
+      catch { return false; }
+    }, 'owned polaroid browser port', 15000);
+    const page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(p => p.type === 'page');
+    cdp = await connect(page.webSocketDebuggerUrl);
+    cdp.on('Fetch.requestPaused', async ({ requestId, request }) => {
+      const url = new URL(request.url);
+      if (gate && url.origin === hosted.origin && url.pathname === modulePath) {
+        pendingEntry = requestId; receipts.push({ path: url.pathname, paused: true }); return;
+      }
+      const allowed = url.origin === hosted.origin || url.protocol === 'data:'
+        || (url.protocol === 'blob:' && request.url.startsWith(`blob:${hosted.origin}/`));
+      await cdp.send(allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest',
+        { requestId, ...(allowed ? {} : { errorReason: 'BlockedByClient' }) });
+    });
+    cdp.on('Runtime.exceptionThrown', ({ exceptionDetails }) => errors.push(exceptionDetails.exception?.description ?? exceptionDetails.text));
+    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+    await cdp.send('Page.enable'); await cdp.send('Runtime.enable');
+    await cdp.send('Network.enable'); await cdp.send('Network.setCacheDisabled', { cacheDisabled: true });
+    await cdp.send('Target.activateTarget', { targetId: page.id }); await cdp.send('Page.bringToFront');
+    await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+    const evaluate = async expression => {
+      const result = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+      assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails));
+      return result.result.value;
+    };
+    const frames = () => evaluate('new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))');
+    const load = async (width = 1440, delayed = false) => {
+      gate = delayed; pendingEntry = undefined; receipts = []; errors = [];
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width, height: 900, deviceScaleFactor: 1, mobile: width < 768 });
+      if (injection) await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: injection });
+      ({ identifier: injection } = await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+        window.__rows=[];window.__owner=null;window.__listeners=[];window.__shifts=[];
+        const add=window.addEventListener,remove=window.removeEventListener;
+        window.addEventListener=function(type,callback,...rest){
+          if(['pointerup','pointercancel','pointermove','blur'].includes(type))window.__listeners.push({type,callback,removed:false});
+          return add.call(this,type,callback,...rest);
+        };
+        window.removeEventListener=function(type,callback,...rest){
+          const row=window.__listeners.findLast(r=>r.type===type&&r.callback===callback&&!r.removed);
+          if(row)row.removed=true;return remove.call(this,type,callback,...rest);
+        };
+        add.call(window,'blur',e=>window.__rows.push({type:'blur',trusted:e.isTrusted}));
+        for(const type of ['pointerdown','pointermove','pointerup','pointercancel','gotpointercapture','lostpointercapture'])
+          document.addEventListener(type,e=>{const root=e.target.closest?.('.pl-root');
+            if(type==='pointerdown'&&root&&window.__owner===null&&e.isTrusted)window.__owner=e.pointerId;
+            window.__rows.push({type,id:e.pointerId,root:!!root,rootTarget:e.target===root,buttons:e.buttons,trusted:e.isTrusted});});
+        new PerformanceObserver(list=>{for(const e of list.getEntries())window.__shifts.push({time:e.startTime,
+          value:e.value,recent:e.hadRecentInput,sources:e.sources.map(s=>({formation:!!s.node?.closest?.('#formacion'),
+            previous:s.previousRect.toJSON(),current:s.currentRect.toJSON()}))});}).observe({type:'layout-shift',buffered:true});
+      ` }));
+      await cdp.send('Page.navigate', { url: hosted.origin });
+      await until(() => evaluate(`document.readyState!=='loading' && !!document.querySelector('[data-formation-polaroid]')
+        && [...document.querySelectorAll('astro-island')].filter(i=>/WorksWheelShowcase|timeline/.test(i.getAttribute('component-url')))
+          .every(i=>!i.hasAttribute('ssr'))`), 'sibling hydration and parsed formation');
+      await evaluate(`(async()=>{await document.fonts.ready;const r=document.querySelector('[data-formation-polaroid]');
+        scrollTo({top:r.getBoundingClientRect().top+scrollY-100,behavior:'instant'});})()`);
+      if (delayed) {
+        await until(() => pendingEntry, 'actual formation entry interception');
+        await evaluate(`document.querySelector('[data-polaroid-fallback] img').decode()`);
+      }
+      else await until(() => evaluate(`document.querySelector('.pl-root')?.dataset.draws>0`), 'real enhanced formation pose');
+      await frames();
+    };
+    const pose = () => evaluate(`(()=>{const r=document.querySelector('.pl-root');return {offset:Number(r.dataset.offset),
+      drag:r.dataset.drag,draws:Number(r.dataset.draws),velocity:Number(r.dataset.velocity),captured:r.hasPointerCapture(window.__owner??1),
+      transforms:[...r.querySelectorAll('.pl-card')].map(e=>e.style.transform)};})()`);
+    const listeners = () => evaluate(`window.__listeners.filter(r=>!r.removed).map(r=>r.type).sort()`);
+    const mouse = (type, point, held = false) => cdp.send('Input.dispatchMouseEvent',
+      { type, ...point, button: held || type !== 'mouseMoved' ? 'left' : 'none', buttons: held ? 1 : 0,
+        ...(type !== 'mouseMoved' ? { clickCount: 1 } : {}) });
+    const points = () => evaluate(`(()=>{const s=document.querySelector('.pl-root'),r=s.getBoundingClientRect();
+      const inside={x:r.left+r.width*.6,y:r.top+100},outside={x:inside.x,y:r.top-15};return {inside,outside,
+        insideHit:s.contains(document.elementFromPoint(inside.x,inside.y)),outsideHit:!s.contains(document.elementFromPoint(outside.x,outside.y))};})()`);
+    const clean = () => { assert.deepEqual(errors, []); assert.deepEqual(cdp.errors, []); };
+
+    await t.test('delayed real entry preserves stable SSR root and downstream geometry at four widths', async () => {
+      const measurements = [];
+      const geometry = () => evaluate(`(()=>{const r=document.querySelector('[data-formation-polaroid]');
+        const rect=e=>{const b=e.getBoundingClientRect();return {top:b.top+scrollY,height:b.height,width:b.width};};
+        return {root:rect(r),neighbor:rect(document.querySelector('#formacion article')),
+          downstream:rect(document.querySelector('#formacion a[href="#contacto"]')),faq:rect(document.querySelector('#faq'))};})()`);
+      for (const width of [320, 390, 768, 1440]) {
+        await load(width, true);
+        assert.equal(await evaluate(`!!document.querySelector('[data-polaroid-fallback]')&&!document.querySelector('.pl-root')`), true);
+        let before = await geometry();
+        await until(async () => { await frames(); const next = await geometry(); const stable = JSON.stringify(next)===JSON.stringify(before);
+          before = next; return stable; }, 'font/image-ready SSR geometry stabilizes');
+        // Viewport emulation can mark early shifts as recent input. Cross that
+        // exclusion window before release; root/document deltas remain primary.
+        await until(() => evaluate('performance.now()>700'), 'navigation input exclusion window elapsed');
+        const fallback = await evaluate(`(()=>{const r=document.querySelector('[data-formation-polaroid]');return {
+          images:r.querySelectorAll('img').length,captions:r.querySelectorAll('figcaption').length,
+          links:[...r.querySelectorAll('nav a')].map(a=>{const b=a.getBoundingClientRect();return {width:b.width,height:b.height};}),
+          clipped:[...r.querySelectorAll('figcaption')].some(e=>e.scrollHeight>e.clientHeight),
+          contained:[...r.querySelectorAll('img,figcaption,nav a')].every(e=>{const b=e.getBoundingClientRect(),p=r.getBoundingClientRect();
+            return b.height>0&&b.top>=p.top&&b.bottom<=p.bottom+.1;}),
+          fit:getComputedStyle(r.querySelector('img')).objectFit};})()`);
+        assert.equal(fallback.images, 6); assert.equal(fallback.captions, 6);
+        assert.ok(fallback.links.every(r=>r.width>=44&&r.height>=44)); assert.equal(fallback.clipped, false); assert.equal(fallback.fit, 'contain');
+        assert.equal(fallback.contained, true, 'all native images, captions and wrapped links fit the reserved root');
+        const mark = await evaluate('performance.now()');
+        gate = false; await cdp.send('Fetch.continueRequest', { requestId: pendingEntry });
+        receipts.push({ path: modulePath, released: true }); pendingEntry = undefined;
+        await until(() => evaluate(`document.querySelector('.pl-root')?.dataset.draws>0
+          && !document.querySelector('[data-polaroid-fallback]')`), 'released real entry runs passive effects and draws');
+        await frames(); const after = await geometry();
+        const shifts = await evaluate(`window.__shifts.filter(e=>e.time>=${mark})`);
+        measurements.push({width,before,after,rootDelta:after.root.height-before.root.height,
+          neighborDelta:after.neighbor.top-before.neighbor.top,downstreamDelta:after.downstream.top-before.downstream.top,
+          faqDelta:after.faq.top-before.faq.top,shifts,receipts:[...receipts]});
+        clean();
+      }
+      t.diagnostic(`Formation hydration measurements: ${JSON.stringify(measurements)}`);
+      for (const row of measurements) {
+        assert.deepEqual(row.receipts, [{path:modulePath,paused:true},{path:modulePath,released:true}]);
+        assert.ok(Math.abs(row.rootDelta)<1, `${row.width}: root height moved ${row.rootDelta}px`);
+        assert.ok(Math.abs(row.downstreamDelta)<1 && Math.abs(row.neighborDelta)<1 && Math.abs(row.faqDelta)<1,
+          `${row.width}: formation neighbor/downstream document geometry must not move`);
+      }
+    });
+    await t.test('real outside mouse release before capture cannot create a hover drag', async () => {
+      await load();
+      const p = await evaluate(`(()=>{const s=document.querySelector('.pl-root'),r=s.getBoundingClientRect();
+        const inside={x:r.left+r.width*.6,y:r.top+2},outside={x:inside.x,y:r.top-2};return {inside,outside,
+          insideHit:s.contains(document.elementFromPoint(inside.x,inside.y)),outsideHit:!s.contains(document.elementFromPoint(outside.x,outside.y))};})()`);
+      assert.equal(p.insideHit, true); assert.equal(p.outsideHit, true);
+      const before = await pose(), baseline = await listeners();
+      await mouse('mousePressed', p.inside, true); await mouse('mouseMoved', p.outside, true);
+      assert.equal((await pose()).captured, false, 'vertical exit has not captured the horizontal gesture');
+      await mouse('mouseReleased', p.outside);
+      assert.equal(await evaluate(`window.__rows.filter(r=>r.type==='pointerup').at(-1).root`), false);
+      await mouse('mouseMoved', {x:p.inside.x-80,y:p.inside.y}); await frames();
+      assert.deepEqual(await pose(), before, 'actual outside up retires ownership before hover reentry');
+      assert.deepEqual(await listeners(), baseline); clean();
+    });
+    await t.test('foreign pointer contract probes cannot replace move or retire the real mouse owner', async (st) => {
+      for (const type of ['pointerdown','pointermove','pointerup','pointercancel']) await st.test(`foreign ${type}`, async () => {
+        await load(); const p = await points(), baseline = await listeners();
+        await mouse('mousePressed', p.inside, true); await mouse('mouseMoved', {x:p.inside.x-40,y:p.inside.y}, true);
+        const held = await pose(); assert.equal(held.drag, '1'); assert.equal(held.captured, true);
+        // These controlled identity probes are not native multitouch evidence.
+        await evaluate(`document.querySelector('.pl-root').dispatchEvent(new PointerEvent('${type}',
+          {bubbles:true,pointerId:77,pointerType:'touch',button:0,buttons:1,clientX:10,clientY:10}))`);
+        assert.deepEqual(await pose(), held, `${type}: foreign pointer must leave real owner's pose and capture intact`);
+        await mouse('mouseMoved', {x:p.inside.x-70,y:p.inside.y}, true);
+        assert.ok(Math.abs((await pose()).offset-70)<.2, 'original owner continues its direct drag');
+        await mouse('mouseReleased', p.outside); await frames();
+        assert.equal((await pose()).captured, false); assert.equal((await pose()).drag, '0');
+        assert.deepEqual(await listeners(), baseline); clean();
+      });
+    });
+    await t.test('button loss blur root capture loss cancel and resize dispose real held ownership', async (st) => {
+      for (const retirement of ['button loss','blur','capture loss','cancel','resize','preference']) await st.test(retirement, async () => {
+        await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+        await load(); const p = await points(), baseline = await listeners();
+        await mouse('mousePressed', p.inside, true); await mouse('mouseMoved', {x:p.inside.x-40,y:p.inside.y}, true);
+        assert.equal((await pose()).captured, true);
+        if (retirement==='button loss') await mouse('mouseMoved', {x:p.inside.x-45,y:p.inside.y});
+        else if (retirement==='blur') {
+          const secondary = await cdp.send('Target.createTarget', {url:'about:blank'});
+          try {
+            await cdp.send('Target.activateTarget', {targetId:secondary.targetId});
+            await until(() => evaluate(`window.__rows.some(r=>r.type==='blur'&&r.trusted)`), 'real foreground target switch emits blur');
+          } finally {
+            await cdp.send('Target.activateTarget', {targetId:page.id}); await cdp.send('Page.bringToFront');
+            await cdp.send('Target.closeTarget', {targetId:secondary.targetId});
+          }
+        }
+        else if (retirement==='capture loss') await evaluate(`document.querySelector('.pl-root').releasePointerCapture(window.__owner)`);
+        else if (retirement==='cancel') await evaluate(`document.querySelector('.pl-root').dispatchEvent(new PointerEvent('pointercancel',
+          {bubbles:true,pointerId:window.__owner,pointerType:'mouse'}))`);
+        else if (retirement==='resize') await cdp.send('Emulation.setDeviceMetricsOverride', {width:1300,height:900,deviceScaleFactor:1,mobile:false});
+        else {
+          await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'no-preference' }] });
+          await until(() => evaluate(`document.querySelector('.pl-root').dataset.reduced==='false'`), 'live preference controller change');
+          await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: 'reduce' }] });
+          await until(() => evaluate(`!document.querySelector('[data-timeline]').dataset.enhanced`), 'timeline returns to native layout');
+          await evaluate(`document.querySelector('.pl-root').scrollIntoView({block:'center',behavior:'instant'})`);
+          await until(() => evaluate(`document.querySelector('.pl-root').dataset.reduced==='true'`), 'live preference controller restored');
+        }
+        await mouse('mouseMoved', {x:p.inside.x-50,y:p.inside.y}); await frames();
+        assert.equal((await pose()).captured, false, `${retirement}: capture retired`);
+        assert.equal((await pose()).drag, '0', `${retirement}: visible drag state retired`);
+        assert.deepEqual(await listeners(), baseline, `${retirement}: exact acquired listener identities removed`);
+        const stopped = await pose(); await mouse('mouseMoved', {x:p.inside.x-90,y:p.inside.y}); await frames();
+        assert.deepEqual(await pose(), stopped, `${retirement}: no ghost or idle reduced draw`);
+        await mouse('mouseReleased', p.outside); clean();
+      });
+    });
+    await t.test('native multitouch keeps the first owner and descendant capture transfer permits page pan', async () => {
+      await cdp.send('Emulation.setTouchEmulationEnabled', {enabled:true,maxTouchPoints:2});
+      await load(390); const p = await points(), baseline = await listeners();
+      const touch = (type, points = []) => cdp.send('Input.dispatchTouchEvent', {type,
+        touchPoints:points.map(point=>({...point,radiusX:2,radiusY:2}))});
+      const first = {id:1,...p.inside}, second = {id:2,x:p.inside.x+30,y:p.inside.y+20};
+      await touch('touchStart', [first]); await touch('touchStart', [first,second]);
+      await touch('touchMove', [first,{...second,x:second.x-20}]);
+      assert.equal((await pose()).offset, 0, 'second native touch cannot move first owner');
+      await touch('touchEnd', [second]);
+      await touch('touchMove', [{...first,x:first.x-35}]); await touch('touchMove', [{...first,x:first.x-70}]);
+      t.diagnostic(`Native multitouch receipts: ${JSON.stringify(await evaluate('window.__rows'))}; pose: ${JSON.stringify(await pose())}`);
+      await until(async () => Math.abs((await pose()).offset-70)<.2, 'first native touch continues after foreign release');
+      assert.equal((await pose()).captured, true);
+      const rows = await evaluate(`window.__rows.filter(r=>r.trusted)`);
+      assert.equal(new Set(rows.filter(r=>r.type==='pointerdown'&&r.root).map(r=>r.id)).size, 2, 'two acknowledged native pointer identities');
+      assert.ok(rows.some(r=>r.type==='pointerup'&&r.id!==rows.find(r=>r.type==='pointerdown').id));
+      assert.equal(rows.find(r=>r.type==='pointerdown').rootTarget, false, 'native touch begins on a card descendant');
+      await touch('touchCancel'); await frames();
+      assert.equal((await pose()).captured, false); assert.deepEqual(await listeners(), baseline);
+      assert.equal(await evaluate(`window.__rows.some(r=>r.type==='pointercancel'&&r.trusted)`), true);
+      const y = await evaluate('scrollY');
+      await touch('touchStart', [first]);
+      for (let step=1;step<=5;step++) await touch('touchMove', [{...first,y:first.y-step*25}]);
+      await touch('touchEnd');
+      await until(async () => await evaluate('scrollY')>y+30, 'vertical native page pan inside formation');
+      assert.equal((await pose()).offset, 0); assert.deepEqual(await listeners(), baseline); clean();
+    });
+  } finally {
+    if (cdp) { try { await cdp.send('Browser.close'); } catch {} cdp.close(); }
+    if (browser.exitCode === null) browser.kill();
+    hosted.server.closeAllConnections(); await new Promise(done => hosted.server.close(done));
+  }
+});
+
 test('works wheel input ownership', { timeout: 150000 }, async (t) => {
   await access(temporary);
   await access(browserPath);

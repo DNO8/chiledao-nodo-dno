@@ -101,7 +101,8 @@ export default function PolaroidLineCarousel({
   const barRef = React.useRef<HTMLDivElement>(null);
   const cards = React.useRef<(HTMLDivElement | null)[]>([]);
   const sim = React.useRef({ off: 0, vel: 0, target: 0, a: [] as number[], w: [] as number[] });
-  const drag = React.useRef<null | { pointerId: number; x: number; y: number; off: number; lx: number; lt: number; v: number; moved: boolean; vertical: boolean }>(null);
+  const drag = React.useRef<null | { pointerId: number; pointerType: string; x: number; y: number; off: number; lx: number; lt: number; v: number; moved: boolean; vertical: boolean }>(null);
+  const disposeGesture = React.useRef<() => void>(() => {});
   const lastTouch = React.useRef(0), activeRef = React.useRef(0), opts = React.useRef({ sag, swing });
   const reduced = React.useRef(false), wake = React.useRef<() => void>(() => {});
   const destination = React.useRef(0);
@@ -113,6 +114,22 @@ export default function PolaroidLineCarousel({
     sim.current.target = destination.current * spacing;
     wake.current();
   }, [n, spacing]);
+  const release = React.useCallback(() => {
+    const d = drag.current;
+    // Retire ownership before releasing capture: lostpointercapture may reenter.
+    drag.current = null;
+    disposeGesture.current(); disposeGesture.current = () => {};
+    if (d && rootRef.current?.hasPointerCapture(d.pointerId)) rootRef.current.releasePointerCapture(d.pointerId);
+    setDragging(false);
+    return d;
+  }, []);
+  const cancelGesture = React.useCallback(() => {
+    const d = release();
+    if (!d) return;
+    lastTouch.current = performance.now();
+    sim.current.vel = 0;
+    if (d.moved) goTo(activeRef.current);
+  }, [release, goTo]);
 
   React.useEffect(() => {
     const root = rootRef.current, bar = barRef.current;
@@ -211,20 +228,22 @@ export default function PolaroidLineCarousel({
       if (reduced.current) frame(performance.now());
       else if (!raf) { prev = performance.now(); raf = requestAnimationFrame(frame); }
     };
-    const readMotion = () => { reduced.current = query.matches; start(); };
+    const readMotion = () => {
+      if (reduced.current !== query.matches) cancelGesture();
+      reduced.current = query.matches; start();
+    };
+    const readVisibility = () => { if (document.hidden) cancelGesture(); start(); };
     const io = new IntersectionObserver(([e]) => { visible = e.isIntersecting; start(); });
     query.addEventListener('change', readMotion);
-    document.addEventListener('visibilitychange', start);
+    document.addEventListener('visibilitychange', readVisibility);
     io.observe(root); readMotion();
     return () => {
       stop(); io.disconnect();
-      const pointerId = drag.current?.pointerId;
-      if (pointerId !== undefined && root.hasPointerCapture(pointerId)) root.releasePointerCapture(pointerId);
-      drag.current = null; wake.current = () => {};
+      release(); wake.current = () => {};
       query.removeEventListener('change', readMotion);
-      document.removeEventListener('visibilitychange', start);
+      document.removeEventListener('visibilitychange', readVisibility);
     };
-  }, [size, spacing, n, autoplay, goTo]);
+  }, [size, spacing, n, autoplay, goTo, release, cancelGesture]);
   React.useEffect(() => {
     const root = rootRef.current;
     const focused = document.activeElement;
@@ -233,14 +252,33 @@ export default function PolaroidLineCarousel({
   }, [active, n]);
 
   const onDown = (e: React.PointerEvent) => {
-    if (e.button !== 0 || (e.target as HTMLElement).closest('.pl-bar')) return;
+    if (drag.current || e.button !== 0 || (e.target as HTMLElement).closest('.pl-bar')) return;
     lastTouch.current = performance.now();
-    drag.current = { pointerId: e.pointerId, x: e.clientX, y: e.clientY, off: sim.current.off, lx: e.clientX,
+    drag.current = { pointerId: e.pointerId, pointerType: e.pointerType, x: e.clientX, y: e.clientY, off: sim.current.off, lx: e.clientX,
       lt: e.timeStamp, v: 0, moved: false, vertical: false };
+    // Observe retirement outside the root without capturing a click or native pan.
+    const up = (event: PointerEvent) => onUp(event);
+    const cancel = (event: PointerEvent) => onCancel(event);
+    const move = (event: PointerEvent) => {
+      const d = drag.current;
+      if (d?.pointerId === event.pointerId && d.pointerType === 'mouse' && !(event.buttons & 1)) cancelGesture();
+    };
+    window.addEventListener('pointerup', up);
+    window.addEventListener('pointercancel', cancel);
+    window.addEventListener('pointermove', move);
+    window.addEventListener('blur', cancelGesture);
+    disposeGesture.current = () => {
+      window.removeEventListener('pointerup', up);
+      window.removeEventListener('pointercancel', cancel);
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('blur', cancelGesture);
+    };
   };
   const onMove = (e: React.PointerEvent) => {
     const d = drag.current;
-    if (!d || d.vertical) return;
+    if (!d || d.pointerId !== e.pointerId) return;
+    if (d.pointerType === 'mouse' && !(e.buttons & 1)) { cancelGesture(); return; }
+    if (d.vertical) return;
     const dx = e.clientX - d.x, dy = e.clientY - d.y;
     if (!d.moved && Math.abs(dy) > 5 && Math.abs(dy) > Math.abs(dx)) { d.vertical = true; return; }
     if (!d.moved && Math.abs(dx) > 5) { d.moved = true; setDragging(true); rootRef.current?.setPointerCapture(e.pointerId); }
@@ -255,24 +293,24 @@ export default function PolaroidLineCarousel({
     sim.current.off = off;
     if (reduced.current) wake.current();
   };
-  const release = (e: React.PointerEvent) => {
-    if (rootRef.current?.hasPointerCapture(e.pointerId)) rootRef.current.releasePointerCapture(e.pointerId);
-    setDragging(false);
-  };
-  const onUp = (e: React.PointerEvent) => {
+  const onUp = (e: React.PointerEvent | PointerEvent) => {
     const d = drag.current;
-    drag.current = null; lastTouch.current = performance.now(); release(e);
-    if (!d || d.vertical) return;
+    if (!d || d.pointerId !== e.pointerId) return;
+    release(); lastTouch.current = performance.now();
+    if (d.vertical) return;
     if (d.moved) {
       sim.current.vel = reduced.current ? 0 : -d.v * 1000;
       goTo(nearestAt(sim.current.off - (reduced.current ? 0 : d.v * 180), spacing, n)); return;
     }
-    const card = (e.target as HTMLElement).closest('[data-i]');
+    const card = e.target instanceof Element && rootRef.current?.contains(e.target) ? e.target.closest('[data-i]') : null;
     if (card) goTo(Number(card.getAttribute('data-i')));
   };
-  const onCancel = (e: React.PointerEvent) => {
-    drag.current = null; release(e); sim.current.vel = 0;
-    goTo(activeRef.current);
+  const onCancel = (e: React.PointerEvent | PointerEvent) => {
+    if (drag.current?.pointerId === e.pointerId) cancelGesture();
+  };
+  const onLostCapture = (e: React.PointerEvent) => {
+    // Implicit descendant touch capture can be lost during transfer to this root.
+    if (e.target === e.currentTarget && drag.current?.moved) onCancel(e);
   };
   const step = (dir: number) => { lastTouch.current = performance.now(); goTo(clamp(activeRef.current + dir, 0, n - 1)); };
   const onKey = (e: React.KeyboardEvent) => {
@@ -288,7 +326,7 @@ export default function PolaroidLineCarousel({
     style={{ height, '--pl-bg': background, '--pl-ink': ink, '--pl-muted': '#514b43', '--pl-line': '#80776b', '--pl-cw': size.cw + 'px', ...style } as React.CSSProperties}
     data-drag={dragging ? '1' : '0'} data-active={active} role="region" aria-roledescription="carrusel"
     aria-label={ariaLabel} tabIndex={0} onKeyDown={onKey} onPointerDown={onDown} onPointerMove={onMove}
-    onPointerUp={onUp} onPointerCancel={onCancel}>
+    onPointerUp={onUp} onPointerCancel={onCancel} onLostPointerCapture={onLostCapture}>
     <style>{PL_CSS}</style>
     <svg className="pl-string" aria-hidden="true"><path ref={pathRef} fill="none" stroke={string} strokeWidth="1.5" strokeLinecap="round" /></svg>
     {slides.map((sl, i) => <div key={sl.image} className="pl-card" data-i={i} data-on={i === active ? '1' : '0'}

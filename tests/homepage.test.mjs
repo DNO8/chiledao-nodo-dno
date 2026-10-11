@@ -381,6 +381,11 @@ test('formation retains six distinct responsive workshop photographs', () => {
 test('Polaroid offers six factual SSR prints and native navigation before enhancement', () => {
   const carousels = all(main, (node) => 'data-formation-polaroid' in node.attrs);
   assert.equal(carousels.length, 1);
+  const html = readFileSync(new URL('../dist/index.html', import.meta.url), 'utf8');
+  assert.match(html, /\[data-formation-polaroid\] \{ --formation-height:540px; height:var\(--formation-height\)/,
+    'native SSR reserves the same height consumed by enhancement');
+  assert.match(html, /\[data-polaroid-fallback\] picture \{[^}]*flex:1; min-height:0/,
+    'native artwork absorbs remaining height rather than assuming caption or navigation wrapping');
   const ids = all(document, (node) => node.attrs.id).map((node) => node.attrs.id);
   assert.equal(new Set(ids).size, ids.length, 'no duplicate IDs');
   for (const carousel of carousels) {
