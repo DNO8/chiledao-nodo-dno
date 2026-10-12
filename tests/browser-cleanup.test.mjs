@@ -92,7 +92,7 @@ test('all independently owned CDP sockets retire even when the first close throw
 test('every browser group establishes protected acquisition and shared teardown', async () => {
   const source = await readFile(new URL('./homepage.browser.test.mjs', import.meta.url), 'utf8');
   const groups = source.split('\ntest(').slice(1);
-  assert.equal(groups.length, 20, 'all actual browser groups are accounted for');
+  assert.equal(groups.length, 21, 'all actual browser groups are accounted for');
   for (const group of groups) {
     const name = group.slice(0, group.indexOf(', {'));
     assert.match(group, /cleanupOwnedBrowser\(/, `${name}: guarded shared teardown`);

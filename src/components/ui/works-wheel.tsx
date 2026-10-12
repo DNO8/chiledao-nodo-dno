@@ -186,9 +186,24 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
       return;
     }
     let frame = 0;
+    const element = stageRef.current;
+    if (!element) return;
+    // Seed from actual bounds: an observer's first asynchronous notification
+    // must not let a restored/offscreen page start interpolating in the meantime.
+    const inViewport = () => {
+      const bounds = element.getBoundingClientRect();
+      return bounds.bottom > 0 && bounds.top < window.innerHeight
+        && bounds.right > 0 && bounds.left < window.innerWidth;
+    };
+    let visible = inViewport();
+    let hidden = document.hidden;
+    const stop = () => { cancelAnimationFrame(frame); frame = 0; };
     const { ringR, ringX, ringScale, drumR, bow } = metrics;
     const draw = () => {
       frame = 0;
+      // Bounds also close the gap between native scrolling and observer delivery.
+      // Preserve both the pose and target; reentry resumes, never catches up.
+      if (document.hidden || !visible || !inViewport()) return;
       const gap = target.current - turn.current;
       if (reduced || Math.abs(gap) < 0.0005) turn.current = target.current;
       else turn.current += gap * EASE;
@@ -244,9 +259,38 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
       setActive(prev => prev === near ? prev : near);
       if (turn.current !== target.current) frame = requestAnimationFrame(draw);
     };
-    wake.current = () => { if (!frame) frame = requestAnimationFrame(draw); };
+    wake.current = () => {
+      if (!frame && !document.hidden && visible && inViewport()) frame = requestAnimationFrame(draw);
+    };
+    const sync = (nextVisible: boolean) => {
+      const nextHidden = document.hidden;
+      const resumed = (!visible || hidden) && nextVisible && !nextHidden;
+      visible = nextVisible;
+      hidden = nextHidden;
+      if (!visible || hidden) stop();
+      else if (resumed) wake.current();
+    };
+    const read = () => sync(inViewport());
+    const observer = typeof IntersectionObserver === 'function'
+      ? new IntersectionObserver(entries => sync(entries[0].isIntersecting && inViewport())) : null;
+    observer?.observe(element);
+    // Keep measured manual interaction usable even without IntersectionObserver.
+    if (!observer) {
+      window.addEventListener('scroll', read, { passive: true });
+      window.addEventListener('resize', read);
+    }
+    document.addEventListener('visibilitychange', read);
     wake.current();
-    return () => { cancelAnimationFrame(frame); wake.current = () => {}; };
+    return () => {
+      stop();
+      observer?.disconnect();
+      if (!observer) {
+        window.removeEventListener('scroll', read);
+        window.removeEventListener('resize', read);
+      }
+      document.removeEventListener('visibilitychange', read);
+      wake.current = () => {};
+    };
   }, [metrics, stage.h, ready, count, last, reduced, onModeChange]);
 
   const to = React.useCallback((next: number) => {

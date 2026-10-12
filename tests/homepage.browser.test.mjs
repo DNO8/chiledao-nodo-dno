@@ -87,10 +87,27 @@ async function connect(url) {
   const pending = new Map();
   const listeners = new Map();
   const errors = [];
+  const context = { stage: 'startup', load: 0 }, diagnostics = [], protocolFailures = [];
+  const pausedRequests = new Map();
+  const safe = value => Object.fromEntries(['requestId','networkId','frameId','loaderId','resourceType','stage','load']
+    .filter(key => ['string','number'].includes(typeof value?.[key])).map(key => [key,value[key]]));
+  const note = (event, fields = {}) => {
+    const row = { event, time: Date.now(), ...safe(fields), context: safe(context) };
+    if (diagnostics.length === 128) diagnostics.shift();
+    diagnostics.push(row);
+    if (event === 'request-paused' && row.requestId) {
+      if (pausedRequests.size === 64) pausedRequests.delete(pausedRequests.keys().next().value);
+      pausedRequests.set(row.requestId, row);
+    }
+    return row;
+  };
   const send = (method, params = {}, sessionId) => new Promise((done, reject) => {
     const id = ++serial;
+    const command = note('send', params);
+    command.id = id; command.method = method;
+    if (params.requestId) command.paused = pausedRequests.get(params.requestId);
     const timeout = setTimeout(() => { pending.delete(id); reject(new Error(`CDP timed out: ${method}`)); }, 10000);
-    pending.set(id, { done, reject, timeout });
+    pending.set(id, { done, reject, timeout, command });
     try { socket.send(JSON.stringify({ id, method, params, ...(sessionId ? { sessionId } : {}) })); }
     catch (error) { pending.delete(id); clearTimeout(timeout); reject(error); }
   });
@@ -101,17 +118,33 @@ async function connect(url) {
       if (!call) return;
       pending.delete(message.id);
       clearTimeout(call.timeout);
-      if (message.error) call.reject(new Error(JSON.stringify(message.error)));
-      else call.done(message.result);
+      if (message.error) {
+        const rejected = note('rejected', call.command);
+        rejected.id = message.id; rejected.method = call.command.method;
+        const response = { command: call.command, code: message.error.code, response: rejected };
+        if (protocolFailures.length === 32) protocolFailures.shift();
+        protocolFailures.push(response);
+        const error = new Error(JSON.stringify(message.error));
+        error.cdpCommand = response;
+        call.reject(error);
+      } else {
+        const response = note('response', message.result);
+        response.id = message.id; response.method = call.command.method;
+        if (call.command.requestId) response.requestId = call.command.requestId;
+        call.done(message.result);
+      }
     } else {
       for (const listener of listeners.get(message.method) ?? []) {
-        Promise.resolve(listener(message.params, message.sessionId)).catch((error) => errors.push(error.message));
+        Promise.resolve(listener(message.params, message.sessionId)).catch((error) => {
+          errors.push(error.message);
+          note('listener-rejected', message.params);
+        });
       }
     }
   };
   socket.addEventListener('message', receive);
   return {
-    send, errors,
+    send, errors, context, diagnostics, protocolFailures, note,
     on(method, listener) {
       listeners.set(method, [...(listeners.get(method) ?? []), listener]);
     },
@@ -125,6 +158,7 @@ async function connect(url) {
         }
         pending.clear();
         listeners.clear();
+        pausedRequests.clear();
       }
     },
   };
@@ -655,13 +689,29 @@ test('polaroid gesture ownership and hydration sizing', { timeout: 150000 }, asy
       await until(() => evaluate(`document.readyState!=='loading' && !!document.querySelector('[data-formation-polaroid]')
         && [...document.querySelectorAll('astro-island')].filter(i=>/WorksWheelShowcase|timeline/.test(i.getAttribute('component-url')))
           .every(i=>!i.hasAttribute('ssr'))`), 'sibling hydration and parsed formation');
-      await evaluate(`(async()=>{await document.fonts.ready;const r=document.querySelector('[data-formation-polaroid]');
-        scrollTo({top:r.getBoundingClientRect().top+scrollY-100,behavior:'instant'});})()`);
+      const positioned = await evaluate(`(async()=>{await document.fonts.ready;const r=document.querySelector('[data-formation-polaroid]');
+        scrollTo({top:r.getBoundingClientRect().top+scrollY-100,behavior:'instant'});
+        return {scroll:scrollY,bounds:r.getBoundingClientRect().toJSON(),hidden:document.hidden,
+          enhanced:document.querySelector('[data-timeline]')?.dataset.enhanced};})()`);
       if (delayed) {
         await until(() => pendingEntry, 'actual formation entry interception');
         await evaluate(`document.querySelector('[data-polaroid-fallback] img').decode()`);
       }
-      else await until(() => evaluate(`document.querySelector('.pl-root')?.dataset.draws>0`), 'real enhanced formation pose');
+      else {
+        try { await until(() => evaluate(`document.querySelector('.pl-root')?.dataset.draws>0`), 'real enhanced formation pose'); }
+        catch (error) {
+          try {
+            t.diagnostic(`Formation readiness failure: ${JSON.stringify({positioned,current:await evaluate(`(() => {
+              const r=document.querySelector('[data-formation-polaroid]'),p=document.querySelector('.pl-root');return {
+                scroll:scrollY,bounds:r.getBoundingClientRect().toJSON(),pose:p?.getBoundingClientRect().toJSON(),
+                hidden:document.hidden,focus:document.hasFocus(),ready:document.readyState,
+                media:matchMedia('(prefers-reduced-motion: reduce)').matches,reduced:p?.dataset.reduced,draws:p?.dataset.draws,
+                enhanced:document.querySelector('[data-timeline]')?.dataset.enhanced,
+                islands:[...document.querySelectorAll('astro-island')].map(i=>({url:i.getAttribute('component-url'),ssr:i.hasAttribute('ssr')}))};})()`),errors,cdpErrors:cdp.errors})}`);
+          } catch (diagnosticError) { t.diagnostic(`Formation readiness diagnostics unavailable: ${diagnosticError.message}`); }
+          throw error;
+        }
+      }
       await frames();
     };
     const pose = () => evaluate(`(()=>{const r=document.querySelector('.pl-root');return {offset:Number(r.dataset.offset),
@@ -1048,7 +1098,7 @@ test('archive semantics and keyboard ownership', { timeout: 150000 }, async (t) 
       await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: name, code: name, windowsVirtualKeyCode: code });
       await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: name, windowsVirtualKeyCode: code });
     };
-    const settled = expected => until(() => evaluate(`Math.abs(Number(document.querySelector('[data-works-stage]').dataset.turn)-${expected})<.0005
+    const settled = expected => until(() => evaluate(`Number(document.querySelector('[data-works-stage]').dataset.turn)===${expected}
       && document.querySelector('[data-works-showcase]').dataset.mode==='${expected === 0 ? 'ring' : 'drum'}'`), `archive settled at ${expected}`);
     const heading = async mode => {
       const { nodes } = await cdp.send('Accessibility.getFullAXTree');
@@ -1290,6 +1340,183 @@ test('archive native input and hydration focus', { timeout: 150000 }, async (t) 
   finally {
     await cleanupOwnedBrowser({ browser, cdp, connections: [browserCdp], server: hosted.server, primaryError,
       report: result => t.diagnostic(`Owned cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}`) });
+  }
+});
+
+test('works wheel offscreen suspension', { timeout: 150000 }, async (t) => {
+  await access(temporary);
+  await access(browserPath);
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-wheel-suspension-profile-')),
+    startBrowser: profile => spawn(browserPath, [
+      '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+      `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
+      '--disable-background-networking', '--disable-component-update', '--disable-sync',
+      '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
+    ], { stdio: 'ignore', windowsHide: true }) });
+  let cdp, controller, injection, otherTarget, primaryError;
+  const errors = [];
+  try {
+    const port = await until(async () => {
+      try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
+      catch { return false; }
+    }, 'owned suspension browser port', 15000);
+    const page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(p => p.type === 'page');
+    const version = await (await fetch(`http://127.0.0.1:${port}/json/version`)).json();
+    controller = await connect(version.webSocketDebuggerUrl);
+    cdp = await connect(page.webSocketDebuggerUrl);
+    cdp.on('Fetch.requestPaused', async ({ requestId, request }) => {
+      const url = new URL(request.url);
+      const allowed = url.origin === hosted.origin || url.protocol === 'data:'
+        || (url.protocol === 'blob:' && request.url.startsWith(`blob:${hosted.origin}/`));
+      await cdp.send(allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest',
+        { requestId, ...(allowed ? {} : { errorReason: 'BlockedByClient' }) });
+    });
+    cdp.on('Runtime.exceptionThrown', ({ exceptionDetails }) => errors.push(exceptionDetails.exception?.description ?? exceptionDetails.text));
+    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+    await cdp.send('Page.enable'); await cdp.send('Runtime.enable');
+    await cdp.send('Emulation.setDeviceMetricsOverride', { width: 1440, height: 900, deviceScaleFactor: 1, mobile: false });
+    const evaluate = async expression => {
+      const result = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+      assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails));
+      return result.result.value;
+    };
+    const media = value => cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value }] });
+    const hide = async () => {
+      ({ targetId: otherTarget } = await controller.send('Target.createTarget', { url: 'about:blank' }));
+      await controller.send('Target.activateTarget', { targetId: otherTarget });
+      await until(() => evaluate('document.hidden'), 'browser-owned target hides actual document');
+    };
+    const reveal = async () => {
+      await controller.send('Target.activateTarget', { targetId: page.id }); await cdp.send('Page.bringToFront');
+      await until(() => evaluate('!document.hidden'), 'actual foreground visibility restored');
+      await controller.send('Target.closeTarget', { targetId: otherTarget }); otherTarget = undefined;
+    };
+    const load = async (source = '') => {
+      if (injection) await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: injection });
+      ({ identifier: injection } = await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `
+        window.__wheelObservers=[];window.__visibilityListeners=[];window.__wheelKeys=[];
+        const NativeObserver=window.IntersectionObserver;
+        window.IntersectionObserver=class extends NativeObserver {
+          constructor(...args){super(...args);this.row={stage:false,disconnected:false};window.__wheelObservers.push(this.row);}
+          observe(element){if(element.matches('[data-works-stage]')){this.row.stage=true;window.__pendingWheelObserver=this.row;}return super.observe(element);}
+          disconnect(){this.row.disconnected=true;return super.disconnect();}
+        };
+        const add=document.addEventListener,remove=document.removeEventListener;
+        document.addEventListener=function(type,callback,...rest){
+          if(type==='visibilitychange'){
+            const row={callback,removed:false};window.__visibilityListeners.push(row);
+            if(window.__pendingWheelObserver){window.__pendingWheelObserver.listener=row;window.__pendingWheelObserver=null;}
+          }
+          return add.call(this,type,callback,...rest);
+        };
+        document.removeEventListener=function(type,callback,...rest){
+          const row=window.__visibilityListeners.findLast(r=>r.callback===callback&&!r.removed);
+          if(type==='visibilitychange'&&row)row.removed=true;return remove.call(this,type,callback,...rest);
+        };
+        document.addEventListener('keydown',e=>window.__wheelKeys.push({key:e.key,trusted:e.isTrusted,cancelled:e.defaultPrevented}));
+        ${source}
+      ` }));
+      await controller.send('Target.activateTarget', { targetId: page.id });
+      await cdp.send('Page.bringToFront');
+      await cdp.send('Page.navigate', { url: hosted.origin });
+      await until(() => evaluate(`document.readyState==='complete' && document.querySelector('[data-works-stage]')?.getAttribute('role')==='listbox'`), 'real measured archive');
+      await delay(100);
+    };
+    const pose = () => evaluate(`(() => {const s=window.__detachedWheel??document.querySelector('[data-works-stage]');return {
+      turn:Number(s.dataset.turn),draws:Number(s.dataset.draws??0),bottom:s.getBoundingClientRect().bottom,
+      hidden:document.hidden,selected:s.getAttribute('aria-activedescendant')};})()`);
+    const end = async () => {
+      await evaluate(`document.querySelector('[data-works-stage]').focus({preventScroll:true})`);
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'End', code: 'End', windowsVirtualKeyCode: 35 });
+      await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'End', windowsVirtualKeyCode: 35 });
+      assert.deepEqual(await evaluate('window.__wheelKeys.at(-1)'), { key: 'End', trusted: true, cancelled: true });
+    };
+    const converged = async () => {
+      await until(async () => (await pose()).turn === 8, 'preserved last target converges');
+      await delay(100); // Retire the final selected-card geometry effect before testing idle.
+      const rest = await pose(); await delay(180);
+      assert.equal((await pose()).draws, rest.draws, 'settled endpoint has no idle drawing');
+      assert.ok(rest.selected.endsWith('-work-7'), 'last artwork remains selected');
+    };
+
+    await t.test('native outward boundary suspends a pending target and reentry converges', async () => {
+      await media('no-preference'); await load(); await end();
+      const point = await evaluate(`(() => {const s=document.querySelector('[data-works-stage]'),r=s.getBoundingClientRect();
+        const x=r.x+r.width/2,y=r.y+r.height*.6;return {x,y,hit:s.contains(document.elementFromPoint(x,y))};})()`);
+      assert.equal(point.hit, true);
+      await cdp.send('Input.dispatchMouseEvent', { type: 'mouseWheel', x: point.x, y: point.y, deltaX: 0, deltaY: 2200 });
+      await until(async () => (await pose()).bottom < 0, 'native outward wheel leaves viewport');
+      await delay(60); // Allow the native intersection notification, not interpolation settlement.
+      const suspended = await pose();
+      assert.ok(suspended.turn > 0 && suspended.turn < 8, 'leave while last target is still pending');
+      await delay(260);
+      const held = await pose();
+      t.diagnostic(`offscreen pending pose: ${JSON.stringify({ suspended, held })}`);
+      assert.equal(held.draws, suspended.draws, 'offscreen stage must not retain its finite RAF tail');
+      assert.equal(held.turn, suspended.turn, 'offscreen interpolation is suspended, not snapped');
+      await evaluate(`scrollTo({top:0,behavior:'instant'})`);
+      await converged();
+    });
+
+    await t.test('native hidden document preserves pending selection and resumes', async () => {
+      await load(); await end(); await hide();
+      await delay(60);
+      const suspended = await pose();
+      assert.ok(suspended.turn < 8, 'target is pending when hidden');
+      await delay(260);
+      const held = await pose();
+      assert.equal(held.draws, suspended.draws); assert.equal(held.turn, suspended.turn);
+      await reveal(); await converged();
+    });
+
+    await t.test('initial offscreen synchronization and live reduction do not consume the pending target', async () => {
+      await load(`addEventListener('DOMContentLoaded',()=>scrollTo({top:2200,behavior:'instant'}),{once:true});`);
+      assert.ok((await pose()).bottom < 0);
+      const initial = await pose(); await end(); await delay(220);
+      assert.equal((await pose()).draws, initial.draws, 'initially offscreen inputs schedule no drawing');
+      // Changing media can reset native scroll anchoring in the landing. Hide the
+      // actual document as well so this check cannot accidentally become reentry.
+      await hide();
+      await media('reduce'); await delay(180);
+      t.diagnostic(`live offscreen reduction: ${JSON.stringify({initial,after:await pose(),scroll:await evaluate('scrollY')})}`);
+      assert.equal((await pose()).hidden, true);
+      assert.equal((await pose()).turn, initial.turn, 'live reduction while suspended preserves pending target');
+      assert.equal((await pose()).draws, initial.draws, 'live reduction cannot paint a hidden stage');
+      await reveal();
+      await evaluate(`scrollTo({top:0,behavior:'instant'})`); await converged();
+      await load(); await end(); await converged(); // Initial reduced motion snaps, without idle frames.
+      await media('no-preference');
+    });
+
+    await t.test('missing intersection observer retains usable measured keyboard interaction', async () => {
+      await media('no-preference'); await load('window.IntersectionObserver=undefined;'); await end();
+      await evaluate(`scrollTo({top:2200,behavior:'instant'})`); await delay(60);
+      const suspended = await pose();
+      assert.ok(suspended.bottom < 0 && suspended.turn < 8, 'fallback suspends a pending measured target');
+      await delay(220);
+      assert.equal((await pose()).draws, suspended.draws); assert.equal((await pose()).turn, suspended.turn);
+      await evaluate(`scrollTo({top:0,behavior:'instant'})`); await converged();
+      assert.equal(await evaluate(`document.querySelector('[data-works-stage]').getAttribute('role')`), 'listbox');
+    });
+
+    await t.test('actual island unmount retires observer, visibility listener and pending RAF', async () => {
+      await load(); await end();
+      const receipt = await evaluate(`(() => {const s=document.querySelector('[data-works-stage]'),island=s.closest('astro-island');
+        window.__detachedWheel=s;
+        island.remove();document.dispatchEvent(new Event('astro:after-swap'));return {island:!!island,turn:Number(s.dataset.turn)};})()`);
+      assert.equal(receipt.island, true); assert.ok(receipt.turn < 8);
+      await until(() => evaluate(`window.__wheelObservers.some(r=>r.stage)&&window.__wheelObservers.filter(r=>r.stage).every(r=>r.disconnected)`), 'real wheel observer disconnected on React unmount');
+      assert.equal(await evaluate('window.__wheelObservers.filter(r=>r.stage).every(r=>r.listener?.removed)'), true, 'owned wheel visibility listeners removed');
+      const disposed = await pose();
+      await evaluate(`scrollTo({top:2200,behavior:'instant'});document.dispatchEvent(new Event('visibilitychange'))`);
+      await media('reduce'); await delay(260);
+      assert.equal((await pose()).draws, disposed.draws); assert.equal((await pose()).turn, disposed.turn);
+    });
+    assert.deepEqual(errors, []); assert.deepEqual(cdp.errors, []); assert.deepEqual(controller.errors, []);
+  } catch (error) { primaryError = error; }
+  finally {
+    await cleanupOwnedBrowser({ browser, server: hosted.server, connections: [cdp, controller], primaryError });
   }
 });
 
@@ -1844,7 +2071,20 @@ test('progressive enhancement capability fallbacks', { timeout: 150000 }, async 
     }, 'owned capability browser port', 15000);
     const page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(target => target.type === 'page');
     cdp = await connect(page.webSocketDebuggerUrl);
-    cdp.on('Fetch.requestPaused', async ({ requestId, request }) => {
+    cdp.on('Page.frameNavigated', ({ frame }) => {
+      if (!frame.parentId) {
+        cdp.context.frameId = frame.id; cdp.context.loaderId = frame.loaderId;
+        cdp.note('document', { frameId: frame.id, loaderId: frame.loaderId });
+      }
+    });
+    const requestLoaders = new Map();
+    cdp.on('Network.requestWillBeSent', ({ requestId, frameId, loaderId, type }) => {
+      if (requestLoaders.size === 128) requestLoaders.delete(requestLoaders.keys().next().value);
+      requestLoaders.set(requestId, { frameId, loaderId });
+      cdp.note('network-request', { networkId: requestId, frameId, loaderId, resourceType: type });
+    });
+    cdp.on('Fetch.requestPaused', async ({ requestId, request, networkId, frameId, resourceType }) => {
+      cdp.note('request-paused', { requestId, networkId, frameId, resourceType, ...requestLoaders.get(networkId) });
       const url = new URL(request.url);
       const allowed = url.origin === hosted.origin || url.protocol === 'data:'
         || (url.protocol === 'blob:' && request.url.startsWith(`blob:${hosted.origin}/`));
@@ -1891,6 +2131,8 @@ test('progressive enhancement capability fallbacks', { timeout: 150000 }, async 
         { type, button: 'left', clickCount: 1, x: point.x, y: point.y });
     };
     const load = async ({ disabled = false, missing = null, siblings = false } = {}) => {
+      cdp.context.load += 1; cdp.context.stage = `prepare:${missing ?? (disabled ? 'no-js' : 'supported')}`;
+      cdp.note('load-start');
       if (injection) await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: injection });
       isolate = siblings;
       errors = []; faults = []; modalReads = [];
@@ -1906,14 +2148,17 @@ test('progressive enhancement capability fallbacks', { timeout: 150000 }, async 
         });observer.observe(document,{childList:true,subtree:true});
       ` }));
       const previous = (await cdp.send('Page.getFrameTree')).frameTree.frame;
+      cdp.context.frameId = previous.id; cdp.context.loaderId = previous.loaderId; cdp.context.stage = 'navigate';
       const navigation = await cdp.send('Page.navigate', { url: hosted.origin });
       assert.equal(navigation.errorText, undefined);
       assert.ok(navigation.loaderId && navigation.loaderId !== previous.loaderId, 'fresh native loader');
+      cdp.context.frameId = navigation.frameId; cdp.context.loaderId = navigation.loaderId; cdp.context.stage = 'parsed-wait';
       await until(async () => {
         const frame = (await cdp.send('Page.getFrameTree')).frameTree.frame;
         return frame.loaderId === navigation.loaderId && await evaluate(`document.readyState==='complete'
           && !!document.querySelector('astro-island[component-url*="FormationPolaroid"]')`);
       }, 'fresh document parsed');
+      cdp.context.stage = 'assertions'; cdp.note('load-ready');
       t.diagnostic(`fresh capability document: ${JSON.stringify({ missing, disabled, loader: navigation.loaderId })}`);
       return navigation;
     };
@@ -2083,6 +2328,11 @@ test('progressive enhancement capability fallbacks', { timeout: 150000 }, async 
     });
   } catch (error) { primaryError = error; throw error; }
   finally {
+    if (cdp) {
+      t.diagnostic(`capability CDP summary: ${JSON.stringify({errorCount:cdp.errors.length,context:cdp.context,retainedTraceRows:cdp.diagnostics.length})}`);
+      for (const failure of cdp.protocolFailures) t.diagnostic(`capability rejected command: ${JSON.stringify(failure)}`);
+      if (cdp.errors.length) for (const row of cdp.diagnostics.slice(-24)) t.diagnostic(`capability lifecycle tail: ${JSON.stringify(row)}`);
+    }
     await cleanupOwnedBrowser({ browser, cdp, server: hosted.server, primaryError,
       report: result => t.diagnostic(`Owned cleanup: exited=${result.exited}; errors=${result.errors.map(e => e.message).join('; ')}`) });
   }
@@ -3639,20 +3889,59 @@ test('hero decoded image fade entrance', { timeout: 120000 }, async (t) => {
     };
     const navigate = async () => {
       await drain();
+      await evaluate(`window.__fadeSampler?.stop('navigation')`);
       await cdp.send('Page.navigate', { url: hosted.origin });
     };
     await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `
        window.__orbitSamples=[];
        window.__fadeTrace=[];
-       const trace=(event,fields={})=>window.__fadeTrace.push({event,time:performance.now(),...fields});
-       const observed=new WeakSet();
-       new PerformanceObserver(list=>list.getEntries().forEach(e=>trace('longtask',{start:e.startTime,duration:e.duration}))).observe({type:'longtask',buffered:true});
-       let previousFrame=0;
-        const sample=()=>{
-         const now=performance.now();
+        const trace=(event,fields={})=>window.__fadeTrace.push({event,time:performance.now(),...fields});
+        // Image.complete reports network completion, not decode fulfillment.
+        // Observe the owner's actual native promise without replacing its result
+        // or starting decode/playback on behalf of the application.
+        const decodedImages=new WeakMap(),nativeDecode=HTMLImageElement.prototype.decode;
+        const decodeProbe=function(...args){
+          const promise=nativeDecode.apply(this,args);
+          promise.then(()=>{
+            const receipt={time:performance.now(),src:this.currentSrc};
+            decodedImages.set(this,receipt);
+            trace('decode-fulfilled',receipt);
+          },()=>trace('decode-rejected',{src:this.currentSrc}));
+          return promise;
+        };
+        HTMLImageElement.prototype.decode=decodeProbe;
+        const observed=new WeakSet();
+        const longTasks=new PerformanceObserver(list=>list.getEntries().forEach(e=>trace('longtask',{start:e.startTime,duration:e.duration})));
+        longTasks.observe({type:'longtask',buffered:true});
+        const sampler=window.__fadeSampler={state:'observing',frame:0,deadline:6500,terminalFrames:[],count:0};
+        let owners,images,root,deadlineTimer=0;
+        const pagehide=()=>stop('pagehide');
+        const stop=reason=>{
+          if(sampler.state!=='observing')return;
+          sampler.state=reason;sampler.ended=performance.now();
+          cancelAnimationFrame(sampler.frame);sampler.frame=0;clearTimeout(deadlineTimer);
+          removeEventListener('pagehide',pagehide);longTasks.disconnect();
+          if(HTMLImageElement.prototype.decode===decodeProbe)HTMLImageElement.prototype.decode=nativeDecode;
+          trace('sampler-stop',{state:reason,count:sampler.count,terminalFrames:sampler.terminalFrames});
+        };
+        sampler.stop=stop;
+        addEventListener('pagehide',pagehide,{once:true});
+        deadlineTimer=setTimeout(()=>stop('deadline'),Math.max(0,sampler.deadline-performance.now()));
+        let previousFrame=0;
+         const sample=frame=>{
+          sampler.frame=0;
+          const now=performance.now();
          if(previousFrame&&now-previousFrame>50)trace('frame-gap',{from:previousFrame,gap:now-previousFrame});
          previousFrame=now;
         const photos=[...document.querySelectorAll('[data-hero-photo]')];
+        if(!owners&&photos.length===8){
+          owners=photos;images=owners.map(p=>p.querySelector('img'));root=document.querySelector('[data-works-showcase]');
+          sampler.count=owners.length;
+        }
+        if(owners&&(!root?.isConnected||document.querySelector('[data-works-showcase]')!==root||photos.length!==8
+          ||owners.some((p,i)=>p!==photos[i]||!p.isConnected||!images[i]?.isConnected||p.querySelector('img')!==images[i]))) {
+          stop('owner-lost');return;
+        }
         if(photos.length===8){
            const stage=document.querySelector('[data-works-stage]');
           window.__orbitSamples.push({time:performance.now(),phase:document.querySelector('[data-works-showcase]').dataset.heroEntrance,
@@ -3667,10 +3956,17 @@ test('hero decoded image fade entrance', { timeout: 120000 }, async (t) => {
                    animation.ready.then(()=>trace('ready',state()),()=>trace('ready-cancelled',state()));
                    animation.finished.then(()=>trace('finished',state()),()=>trace('cancelled',state()));
                  }
-                return {decoded:img.complete&&img.naturalWidth>0,state:p.dataset.photoReady,src:img.currentSrc,x:r.x+r.width/2,y:r.y+r.height/2,w:r.width,h:r.height,slotX:f.x+f.width/2,slotY:f.y+f.height/2,rotate:s.rotate,alpha:Number(s.opacity),transform:s.transform};})});
+                 const decoded=decodedImages.get(img);
+                 return {loaded:img.complete&&img.naturalWidth>0,decoded:!!decoded&&decoded.src===img.currentSrc,decodedAt:decoded?.time,state:p.dataset.photoReady,src:img.currentSrc,x:r.x+r.width/2,y:r.y+r.height/2,w:r.width,h:r.height,slotX:f.x+f.width/2,slotY:f.y+f.height/2,rotate:s.rotate,alpha:Number(s.opacity),transform:s.transform};})});
         }
-        if(performance.now()<3000)requestAnimationFrame(sample);
-      };requestAnimationFrame(sample);
+        if(performance.now()>=sampler.deadline){stop('deadline');return;}
+        if(owners&&owners.every(p=>p.dataset.photoReady==='complete'&&p.getAnimations().length===0)) {
+          sampler.terminalFrames.push({frame,time:performance.now(),sameOwners:true,count:owners.length,
+            states:owners.map(p=>p.dataset.photoReady),effects:owners.map(p=>p.getAnimations().length)});
+          if(sampler.terminalFrames.length===2){stop('terminal');return;}
+        } else sampler.terminalFrames=[];
+        sampler.frame=requestAnimationFrame(sample);
+      };sampler.frame=requestAnimationFrame(sample);
     ` });
     for (const width of [1440, 390, 320]) {
       await drain();
@@ -3691,8 +3987,16 @@ test('hero decoded image fade entrance', { timeout: 120000 }, async (t) => {
        const path = `${profile}-${width}-midfade.png`;
       await writeFile(path, Buffer.from(data, 'base64'));
       t.diagnostic(`capture: ${path}`);
-       await until(() => evaluate(`document.querySelector('[data-works-showcase]')?.dataset.heroEntrance==='complete' && [...document.querySelectorAll('[data-hero-photo]')].every(p=>getComputedStyle(p).opacity==='1')`), 'bounded per-image entrance completion', 3500);
-      const samples = await evaluate('window.__orbitSamples');
+        await until(() => evaluate(`document.querySelector('[data-works-showcase]')?.dataset.heroEntrance==='complete' && [...document.querySelectorAll('[data-hero-photo]')].every(p=>getComputedStyle(p).opacity==='1')`), 'bounded per-image entrance completion', 3500);
+       const terminal=await until(() => evaluate(`(() => {const s=window.__fadeSampler;
+         return s&&s.state!=='observing'&&{state:s.state,ended:s.ended,deadline:s.deadline,count:s.count,frames:s.terminalFrames};})()`),
+         'bounded same-owner terminal fade observation',6500);
+       t.diagnostic(`fade sampler ${width}: ${JSON.stringify(terminal)}`);
+       assert.equal(terminal.state,'terminal','sampler must retire through native terminal ownership, not its hard deadline');
+       assert.ok(terminal.ended<=terminal.deadline,'terminal observation completes within the document deadline');
+       assert.equal(terminal.count,8);assert.equal(terminal.frames.length,2);
+       assert.ok(terminal.frames[1].frame>terminal.frames[0].frame,'two actual final RAF presentations observed');
+       const samples = await evaluate('window.__orbitSamples');
        for (const row of await evaluate('window.__fadeTrace')) t.diagnostic(`fade lifecycle ${width}: ${JSON.stringify(row)}`);
        const last = samples.at(-1);
        for(let frame=1;frame<samples.length;frame++) for(let i=0;i<8;i++) {
@@ -3708,10 +4012,15 @@ test('hero decoded image fade entrance', { timeout: 120000 }, async (t) => {
         const settled = Array.from({length:8},(_,i)=>samples.find(s=>s.cards[i].decoded&&s.cards[i].alpha===1)?.time);
        assert.ok(settled.every(Number.isFinite), JSON.stringify(settled));
         for (let i=0;i<8;i++) {
-          const first = samples.find(s=>s.cards[i].decoded);
-          assert.ok(first.cards[i].alpha<.2, `first decoded frame ${i} starts near zero`);
-           assert.ok(settled[i]-first.time>=600 && settled[i]-first.time<=950,
-             `per-image visible 800ms fade: image ${i}, first ${first.time}, settled ${settled[i]}, duration ${settled[i]-first.time}`);
+           const first = samples.find(s=>s.cards[i].decoded);
+           assert.ok(first.cards[i].alpha<.2, `first decoded frame ${i} starts near zero`);
+           const decodedAt=first.cards[i].decodedAt;
+           const loadedAt=samples.find(s=>s.cards[i].loaded)?.time;
+           const duration=settled[i]-decodedAt;
+           assert.ok(Number.isFinite(decodedAt), 'actual owner decode promise fulfilled');
+           t.diagnostic(`image ${i} readiness ${width}: ${JSON.stringify({loadedAt,decodedAt,firstFrame:first.time,settled:settled[i],duration})}`);
+            assert.ok(duration>=600 && duration<=950,
+              `per-image visible 800ms fade: image ${i}, decoded ${decodedAt}, settled ${settled[i]}, duration ${duration}`);
         }
         assert.ok(samples.some(s=>s.cards.slice(0,6).every(c=>c.decoded&&c.alpha===1)&&s.cards.slice(6).every(c=>!c.decoded)), 'fast images finish independently of held images');
        await evaluate(`Promise.all([...document.querySelectorAll('[data-hero-photo] img')].map(i=>i.decode()))`);
@@ -3799,8 +4108,12 @@ test('hero decoded image fade entrance', { timeout: 120000 }, async (t) => {
   finally {
     await cleanupOwnedBrowser({ browser, cdp, server: hosted.server, primaryError,
       diagnostics: async () => {
+        try {
+          if (cdp) await cdp.send('Runtime.evaluate', { expression: `window.__fadeSampler?.stop('teardown')` });
+        } finally {
         t.diagnostic(`Interception trace: ${JSON.stringify(interceptionTrace.filter(row => row.event === 'document' || /\/(vendimiatech-chiledao|sub0-chiledao)\./.test(row.url ?? '')))}`);
         if (drain) await drain();
+        }
       },
       report: result => t.diagnostic(`Cleanup: owned fade browser exited=${result.exited}; server closed=${!hosted.server.listening}; errors=${result.errors.map(e => e.message).join('; ')}; profile retained=${profile}`),
     });
@@ -4347,7 +4660,7 @@ test('real browser verifies supplied works wheel, synchronized details and progr
       if (value.exceptionDetails) throw new Error(JSON.stringify(value.exceptionDetails));
       return value.result.value;
     };
-    const resize = async (width, mobile = false) => {
+    const resize = async (width, mobile = false, deferPublication = false) => {
       const hydrated = await evaluate(`document.querySelector('[data-works-stage]')?.getAttribute('role')==='listbox'`);
       let before;
       if (hydrated) {
@@ -4356,7 +4669,35 @@ test('real browser verifies supplied works wheel, synchronized details and progr
       }
       await cdp.send('Emulation.setDeviceMetricsOverride', { width, height: mobile ? 844 : 900, deviceScaleFactor: 1, mobile });
       await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: mobile, maxTouchPoints: 1 });
-      if (hydrated) await publishedGeometry(width, mobile ? 844 : 900, false, before);
+      if (!hydrated) return;
+      const outside=value=>value.stage[1]+value.stage[3]<=0||value.stage[1]>=value.viewport[1];
+      const resized=await until(async () => {
+        const value=await publicationReceipt();
+        return value.viewport[0]===width&&value.viewport[1]===(mobile?844:900)&&value.inputs.w>0&&value.inputs.h>0&&value;
+      }, 'native resize measurement delivered');
+      // Native resizing can itself bring the archive back into view.
+      if (outside(resized)) {
+        const suspended=outside(before)?before:resized;
+        await delay(180);
+        const held=await publicationReceipt();
+        for (const key of ['epoch','owner','turn','draws']) assert.equal(held[key],suspended[key], `offscreen resize preserves ${key}`);
+        assert.equal(held.inputs.active,suspended.inputs.active, 'offscreen resize preserves selected artwork');
+        assert.equal(held.ownerStable&&held.connected,true, 'suspended stage retains the same connected owner');
+        t.diagnostic(`offscreen resize suspension: ${JSON.stringify({viewport:held.viewport,turn:held.turn,draws:held.draws,active:held.inputs.active})}`);
+      }
+      const publish = async () => {
+        const value=await publicationReceipt(),scroll=await evaluate('scrollY');
+        if (outside(value)) {
+          assert.equal(await evaluate(`!!document.querySelector('dialog:modal')`), false, 'reentry never interferes with modal scroll ownership');
+          await evaluate(`scrollTo({top:0,behavior:'instant'})`);
+        }
+        // Keep all eight exact current-input and same-owner checks, but only
+        // after real viewport reentry permits the suspended renderer to publish.
+        await publishedGeometry(width, mobile ? 844 : 900, false, before);
+        if (outside(value)) await evaluate(`scrollTo({top:${scroll},behavior:'instant'})`);
+      };
+      if (deferPublication) return publish;
+      await publish();
     };
     // Independent receipt of the CSS publication contract in works-wheel.tsx.
     // ResizeObserver -> React metrics -> owned RAF must publish CURRENT inputs;
@@ -4402,9 +4743,16 @@ test('real browser verifies supplied works wheel, synchronized details and progr
       const expectedWheel={transform:canonical('transform','translateZ('+(-m*drumR)+'px)'),
         top:canonical('top',mix(h/2,w>=900?h/2:viewerH/2+16)+'px'),left:canonical('left',mix(50,w>=900?34:50)+'%')};
       const actualWheel={transform:wheel.style.transform,top:wheel.style.top,left:wheel.style.left};
+      // Capture rendered selection and publication inputs in the same browser
+      // evaluation, so diagnostics cannot mix poses from separate frame turns.
+      const face=cards[active].firstElementChild.getBoundingClientRect();
+      const product=document.querySelector('[data-product-details]').getBoundingClientRect();
+      const hero=document.querySelector('#inicio').getBoundingClientRect();
+      const geometry={face:{x:face.x,right:face.right,y:face.y,bottom:face.bottom,h:face.height},
+        details:{x:product.x,y:product.y,bottom:product.bottom},hero:{y:hero.y,bottom:hero.bottom,h:hero.height},width:innerWidth};
       return {epoch:performance.timeOrigin,owner:stage.id,ownerStable:!window.__publicationOwner||stage===window.__publicationOwner,
         connected:stage.isConnected&&overlay.isConnected,viewport:[innerWidth,innerHeight],inputs:{w,h,iw,ih,details,active,narrow:w<360},
-        turn,draws:Number(stage.dataset.draws),stage:rect(stage),intro:rect(document.querySelector('[data-hero-intro]')),
+        turn,draws:Number(stage.dataset.draws),stage:rect(stage),intro:rect(document.querySelector('[data-hero-intro]')),geometry,
         metrics:{cardW,cardH,faceW,scale,ringX,ringR},wheel:{actual:actualWheel,expected:expectedWheel},cards:rows,
         matches:cards.length===8&&w>0&&h>0&&rows.every(row=>row.match)&&JSON.stringify(actualWheel)===JSON.stringify(expectedWheel)};
     })()`);
@@ -4594,6 +4942,68 @@ test('real browser verifies supplied works wheel, synchronized details and progr
       for(const row of await evaluate('window.__lateHero.events'))t.diagnostic(`entrance native event: ${JSON.stringify(row)}`);
       return value;
     };
+    const revealPresentation = async epoch => {
+      let latest, primaryError;
+      try {
+        const initial = await evaluate(`(() => {
+          const root=document.querySelector('[data-works-showcase]'),heading=root?.querySelector('h1');
+          const reveals=[...document.querySelectorAll('[data-hero-reveal]')];
+          const probe=window.__heroRevealPresentation={frame:0,pair:null,latest:null};
+          const read=frame=>{
+            const current=[...document.querySelectorAll('[data-hero-reveal]')];
+            const sameOwner=typeof window.__lateHero?.id==='string'&&window.__lateHero.id===${JSON.stringify(epoch)}&&!!root&&root.isConnected
+              &&document.querySelector('[data-works-showcase]')===root&&!!heading&&heading.isConnected
+              &&root.querySelector('h1')===heading&&document.querySelectorAll('#inicio h1').length===1
+              &&reveals.length===2&&current.length===2&&reveals.every((e,i)=>e===current[i]&&e.isConnected&&root.contains(e));
+            const rows=[heading,...reveals].filter(Boolean).map((element,index)=>{
+              const style=getComputedStyle(element);
+              const effects=element.getAnimations().filter(a=>a.effect?.getKeyframes().some(k=>
+                ['opacity','transform','translate','rotate','scale'].some(property=>property in k)));
+              return {owner:index===0?'h1':'reveal-'+index,tag:element.tagName,inline:element.getAttribute('style'),
+                opacity:style.opacity,transform:style.transform,effects:effects.map(a=>({type:a.constructor.name,
+                  state:a.playState,pending:a.pending,current:a.currentTime,duration:a.effect.getTiming().duration}))};
+            });
+            return {frame,epoch:window.__lateHero?.id,sameOwner,rows};
+          };
+          const initial=probe.latest=read(null),deadline=performance.now()+2000;
+          let previous;
+          const sample=frame=>{
+            probe.frame=0;
+            const value=probe.latest=read(frame);
+            const retired=value.sameOwner&&value.rows.length===3&&value.rows.every(row=>row.effects.length===0);
+            if(retired&&previous&&frame>previous.frame&&JSON.stringify(previous.rows)===JSON.stringify(value.rows)) {
+              probe.pair={first:previous,second:value};return;
+            }
+            previous=retired?value:null;
+            if(value.sameOwner&&performance.now()<deadline)probe.frame=requestAnimationFrame(sample);
+          };
+          if(initial.sameOwner)probe.frame=requestAnimationFrame(sample);
+          return initial;
+        })()`);
+        latest=initial;
+        t.diagnostic(`native reveal presentation initial: ${JSON.stringify(initial)}`);
+        assert.equal(initial.sameOwner,true,'one connected H1 and both original reveal owners acquired');
+        const pair=await until(async () => {
+          const probe=await evaluate(`({latest:window.__heroRevealPresentation.latest,pair:window.__heroRevealPresentation.pair})`);
+          latest=probe.latest;
+          assert.equal(latest.sameOwner,true,'native reveal presentation retains the same connected owners and document');
+          return probe.pair;
+        }, 'owned native reveal effects retire across stable actual presentations', 2000);
+        t.diagnostic(`native reveal presentation stable pair: ${JSON.stringify(pair)}`);
+      } catch (error) {
+        primaryError=error;
+        t.diagnostic(`native reveal presentation failure: ${JSON.stringify(latest)}`);
+        throw error;
+      } finally {
+        try {
+          await evaluate(`cancelAnimationFrame(window.__heroRevealPresentation?.frame??0);delete window.__heroRevealPresentation`);
+        } catch (cleanupError) {
+          if (!primaryError) throw cleanupError;
+          (primaryError.cleanupErrors??=[]).push(cleanupError);
+          t.diagnostic(`native reveal probe cleanup failed: ${cleanupError.message}`);
+        }
+      }
+    };
     const entranceComplete = async () => {
       await until(async () => (await entranceState()).state === 'complete', 'bounded hero entrance completion', 2000);
       const hookComplete = await entranceState();
@@ -4610,6 +5020,7 @@ test('real browser verifies supplied works wheel, synchronized details and progr
       assert.equal(value.headings, 1);
       assert.equal(value.text, 'Aprende sobre Blockchain e Inteligencia Artificial');
       assert.ok(value.photos.every(p=>p.opacity===1&&p.transform==='none'), 'all owned inner poses restored');
+      await revealPresentation(value.epoch);
       assert.equal(await evaluate(`getComputedStyle(document.querySelector('h1')).opacity==='1' && [...document.querySelectorAll('[data-hero-reveal]')].every(e=>getComputedStyle(e).opacity==='1'&&getComputedStyle(e).transform==='none')`), true);
       return value;
     };
@@ -4687,11 +5098,22 @@ test('real browser verifies supplied works wheel, synchronized details and progr
         transform: option.style.transform, perspective: stage.style.perspective };
     })()`);
     const wheelSelected = async (index, turn = index + 1) => {
+      // Every rendered-selection wait needs a visible owner, including Home
+      // after timeline/formation travel and selection retained after native pan.
+      const offscreen = await evaluate(`(() => {
+        const r=document.querySelector('[data-works-stage]').getBoundingClientRect();
+        return r.bottom<=0||r.top>=innerHeight||r.right<=0||r.left>=innerWidth;
+      })()`);
+      if (offscreen) await center('[data-works-stage]');
       await until(async () => {
         const value = await wheelState();
         return value.index === index && value.title === titles[index] && Math.abs(value.turn - turn) < 0.001
           && value.decoded && value.transform.length > 0 && Number.parseFloat(value.perspective) > 0;
       }, `wheel activity ${index + 1}, turn ${turn}`);
+      // Selection readiness can precede current geometry's rendered publication.
+      // Reuse the exact eight-card/same-owner stable boundary, not an overlap wait.
+      const immediatePublication = await publicationReceipt();
+      const matchedPublication = await publishedGeometry(...immediatePublication.viewport,turn===0,immediatePublication);
       const value = await wheelState();
       assert.equal(value.category, categories[index]);
       assert.equal(value.selected, 'true');
@@ -4701,13 +5123,7 @@ test('real browser verifies supplied works wheel, synchronized details and progr
       assert.match(value.transform, /rotateZ.*translateY.*rotateX.*translateZ/);
       if (turn > 0) {
         assert.equal(await evaluate(`(() => {const link=document.querySelector('[data-hero-intro] a');link.focus();return document.activeElement!==link})()`), true, 'invisible intro link cannot receive focus');
-        const geometry = await evaluate(`(() => {
-          const stage=document.querySelector('[data-works-stage]');
-          const face=document.getElementById(stage.getAttribute('aria-activedescendant')).firstElementChild.getBoundingClientRect();
-          const details=document.querySelector('[data-product-details]').getBoundingClientRect();
-          const hero=document.querySelector('#inicio').getBoundingClientRect();
-           return {face:{x:face.x,right:face.right,y:face.y,bottom:face.bottom,h:face.height},details:{x:details.x,y:details.y,bottom:details.bottom},hero:{y:hero.y,bottom:hero.bottom,h:hero.height},width:innerWidth};
-        })()`);
+        const geometry = matchedPublication.geometry;
         if (geometry.width >= 900) {
           assert.ok(geometry.face.right < geometry.details.x, `desktop side metadata: ${JSON.stringify(geometry)}`);
           assert.ok(geometry.face.h >= geometry.hero.h * .6, `substantially larger poster: ${JSON.stringify(geometry)}`);
@@ -4989,7 +5405,7 @@ test('real browser verifies supplied works wheel, synchronized details and progr
     await key(' ');
     await until(() => evaluate(`document.querySelector('dialog').matches(':modal')`), 'Space opens lifecycle probe');
     const lockedStyles = await evaluate(`({body:document.body.style.cssText,html:document.documentElement.style.cssText})`);
-    await resize(390, true);
+    const publishModalResize = await resize(390, true, true);
     await cdp.send('Emulation.setEmulatedMedia', {features:[{name:'prefers-reduced-motion',value:'reduce'}]});
     await delay(150);
     assert.equal(await evaluate(`document.querySelector('dialog').matches(':modal') && document.querySelector('dialog').contains(document.activeElement)`), true, 'resize/live reduced motion preserves open dialog and focus');
@@ -5000,6 +5416,7 @@ test('real browser verifies supplied works wheel, synchronized details and progr
     await until(() => evaluate(`!document.querySelector('dialog').open`), 'lifecycle probe closes');
     assert.equal(await evaluate(`document.activeElement===document.querySelector('[data-timeline-image="milestone-0"]') && !window.__originalInvoker.isConnected`), true, 'disconnected invoker returns focus to corresponding current link');
     await evaluate(`document.querySelector('[data-timeline-image="milestone-0"]').replaceWith(window.__originalInvoker);delete window.__originalInvoker`);
+    await publishModalResize();
     await cdp.send('Emulation.setEmulatedMedia', {features:[{name:'prefers-reduced-motion',value:'no-preference'}]});
     await resize(1440);
     t.diagnostic('modal lifecycle: real Space, resize and live reduced motion retained top layer/focus/lock; explicit disconnected-link fault restored current corresponding link');
@@ -5350,9 +5767,20 @@ test('real browser verifies supplied works wheel, synchronized details and progr
         await until(() => evaluate(`(() => {const f=document.querySelectorAll('[data-polaroid-fallback] figure')[${index}],i=f.querySelector('img');return i.complete&&i.naturalWidth>0&&f.querySelector('figcaption').textContent.length>15})()`), `fallback real photo ${index+1}`);
       }
     };
+    const pendingWheel = await publicationReceipt();
+    assert.ok(pendingWheel.stage[1]+pendingWheel.stage[3]<=0, 'keyboard selection begins with the archive fully offscreen');
     await evaluate(`document.querySelector('[data-works-stage]').focus({preventScroll:true})`);
     await key('ArrowDown');
     await key('ArrowDown');
+    await delay(180);
+    const heldWheel = await publicationReceipt();
+    assert.ok(heldWheel.stage[1]+heldWheel.stage[3]<=0, 'preventScroll focus and keyboard input do not cause reentry');
+    for (const field of ['epoch','owner','turn','draws']) {
+      assert.equal(heldWheel[field],pendingWheel[field], `pending offscreen keyboard selection preserves ${field}`);
+    }
+    assert.equal(heldWheel.inputs.active,pendingWheel.inputs.active, 'pending keyboard target does not prematurely change rendered selection');
+    assert.equal(heldWheel.ownerStable&&heldWheel.connected,true, 'pending keyboard input retains the connected stage owner');
+    t.diagnostic(`offscreen keyboard target held before reentry: ${JSON.stringify({turn:heldWheel.turn,draws:heldWheel.draws,active:heldWheel.inputs.active})}`);
     await wheelSelected(1);
     assert.equal((await wheelState()).turn, 2, 'reduced motion skips interpolation');
     const touchPoint = await center('[data-works-stage]');
