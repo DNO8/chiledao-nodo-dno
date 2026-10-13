@@ -81,7 +81,8 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
   const turn = React.useRef(0);
   const target = React.useRef(0);
   const settling = React.useRef(0);
-  const drag = React.useRef<{ pointerId: number; coordinate: number; moved: number; touch: boolean;
+  const drag = React.useRef<{ pointerId?: number; coordinate: number; moved: number; displacement: number;
+    contact?: { identifier: number; x: number; origin: number; consumed: boolean };
     dispose: () => void } | null>(null);
   const suppressClick = React.useRef(false);
   const [active, setActive] = React.useState(0);
@@ -306,9 +307,90 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
     current.dispose();
     suppressClick.current = current.moved > 5;
     const el = stageRef.current;
-    if (el?.hasPointerCapture(current.pointerId)) el.releasePointerCapture(current.pointerId);
-    if (settle && current.moved) to(Math.round(target.current));
+    if (current.pointerId !== undefined && el?.hasPointerCapture(current.pointerId)) el.releasePointerCapture(current.pointerId);
+    if (current.contact) {
+      // Cancellation restores the gesture's origin, never commits a short swipe.
+      const intentional = settle && Math.abs(current.displacement) > 5;
+      to(intentional ? current.displacement > 0 ? Math.ceil(target.current) : Math.floor(target.current)
+        : current.contact.origin);
+    } else if (settle && current.moved) to(Math.round(target.current));
   }, [to]);
+
+  const moveDrag = (coordinate: number) => {
+    const current = drag.current;
+    if (!current) return;
+    const distance = current.coordinate - coordinate;
+    current.moved += Math.abs(distance);
+    current.displacement += distance;
+    to(target.current + distance / DRAG_UNITS);
+    current.coordinate = coordinate;
+  };
+
+  React.useEffect(() => {
+    const el = stageRef.current;
+    if (!el || !ready || typeof TouchEvent !== 'function') return;
+    const start = (event: TouchEvent) => {
+      if (drag.current || event.touches.length !== 1 || event.defaultPrevented
+        || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      const point = event.changedTouches[0];
+      if (!point) return;
+      window.clearTimeout(settling.current);
+      suppressClick.current = false;
+      const finish = (native: TouchEvent) => {
+        if (Array.from(native.changedTouches).some(t => t.identifier === point.identifier)) {
+          endDrag(undefined, native.type === 'touchend');
+        }
+      };
+      const join = (native: TouchEvent) => {
+        if (native.touches.length > 1) endDrag(undefined, false);
+      };
+      const blur = () => endDrag(undefined, false);
+      // Observe joining contacts even outside the stage, but never cancel pinch.
+      window.addEventListener('touchstart', join, { passive: true });
+      window.addEventListener('touchend', finish, { passive: true });
+      window.addEventListener('touchcancel', finish, { passive: true });
+      window.addEventListener('blur', blur);
+      drag.current = { coordinate: point.clientY, moved: 0, displacement: 0,
+        contact: { identifier: point.identifier, x: point.clientX, origin: Math.round(target.current), consumed: false },
+        dispose: () => {
+          window.removeEventListener('touchstart', join);
+          window.removeEventListener('touchend', finish);
+          window.removeEventListener('touchcancel', finish);
+          window.removeEventListener('blur', blur);
+        } };
+    };
+    const move = (event: TouchEvent) => {
+      const current = drag.current;
+      if (!current?.contact) return;
+      if (event.touches.length !== 1) { endDrag(undefined, false); return; }
+      const point = Array.from(event.changedTouches).find(t => t.identifier === current.contact!.identifier);
+      if (!point) return;
+      const distance = current.coordinate - point.clientY;
+      if (!current.contact.consumed) {
+        // Decide on the first move, before native scrolling claims the stream.
+        // Retiring here prevents reclaiming a horizontal/outward gesture later.
+        if (Math.abs(point.clientX - current.contact.x) >= Math.abs(distance)
+          || (target.current === 0 && distance <= 0)
+          || (target.current === last + 1 && distance >= 0)) {
+          endDrag(undefined, false);
+          return;
+        }
+      }
+      if (!event.cancelable || event.defaultPrevented) { endDrag(undefined, false); return; }
+      event.preventDefault();
+      if (!event.defaultPrevented) { endDrag(undefined, false); return; }
+      current.contact.consumed = true;
+      moveDrag(point.clientY);
+    };
+    el.addEventListener('touchstart', start, { passive: true });
+    // Native registration is intentional: React's passive touchmove cannot cancel.
+    el.addEventListener('touchmove', move, { passive: false });
+    return () => {
+      el.removeEventListener('touchstart', start);
+      el.removeEventListener('touchmove', move);
+      if (drag.current?.contact) endDrag(undefined, false);
+    };
+  }, [ready, last, to, endDrag]);
 
   React.useEffect(() => {
     const el = stageRef.current;
@@ -351,12 +433,13 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
         <div ref={stageRef} id={stageId} data-works-stage data-turn="0" tabIndex={ready ? 0 : undefined} role={ready ? 'listbox' : 'group'}
           aria-label="Afiches de actividades" aria-describedby={instructionsId}
           aria-activedescendant={ready ? `${id}-work-${active}` : undefined}
-          className="absolute inset-0 cursor-grab touch-pan-y outline-none focus-visible:outline-2 focus-visible:outline-paper focus-visible:-outline-offset-4 active:cursor-grabbing"
-          style={{ perspective: `${metrics.depth}px` }}
+          className="absolute inset-0 cursor-grab outline-none focus-visible:outline-2 focus-visible:outline-paper focus-visible:-outline-offset-4 active:cursor-grabbing"
+          style={{ perspective: `${metrics.depth}px`, touchAction: 'auto' }}
           onPointerDown={event => {
-            if (!ready || event.button !== 0 || drag.current) return;
+            if (!ready || event.pointerType === 'touch' || event.button !== 0 || drag.current || event.defaultPrevented
+              || event.altKey || event.ctrlKey || event.metaKey || event.shiftKey
+              || (event.isTrusted && !event.isPrimary)) return;
             window.clearTimeout(settling.current);
-            const touch = event.pointerType !== "mouse";
             suppressClick.current = false;
             const release = (native: PointerEvent) => endDrag(native.pointerId);
             const checkButtons = (native: PointerEvent) => {
@@ -367,7 +450,8 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
             window.addEventListener('pointercancel', release);
             window.addEventListener('pointermove', checkButtons);
             window.addEventListener('blur', blur);
-            drag.current = { pointerId: event.pointerId, coordinate: touch ? event.clientX : event.clientY, moved: 0, touch,
+            drag.current = { pointerId: event.pointerId, coordinate: event.clientY,
+              moved: 0, displacement: 0,
               dispose: () => {
                 window.removeEventListener('pointerup', release);
                 window.removeEventListener('pointercancel', release);
@@ -378,18 +462,14 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
           onPointerMove={event => {
             const current = drag.current;
             if (!ready || !current || current.pointerId !== event.pointerId) return;
-            if (!current.touch && !(event.buttons & 1)) {
+            if (event.pointerType === 'mouse' && !(event.buttons & 1)) {
               endDrag(event.pointerId);
               return;
             }
-            const coordinate = current.touch ? event.clientX : event.clientY;
-            const distance = current.coordinate - coordinate;
-            current.moved += Math.abs(distance);
-            if (current.moved > 5 && !event.currentTarget.hasPointerCapture(event.pointerId)) {
+            if (current.moved + Math.abs(current.coordinate - event.clientY) > 5 && !event.currentTarget.hasPointerCapture(event.pointerId)) {
               event.currentTarget.setPointerCapture(event.pointerId);
             }
-            to(target.current + distance / DRAG_UNITS);
-            current.coordinate = coordinate;
+            moveDrag(event.clientY);
           }}
           onPointerUp={event => endDrag(event.pointerId)} onPointerCancel={event => endDrag(event.pointerId)}
           onLostPointerCapture={event => {
@@ -459,7 +539,7 @@ export function WorksWheel({ items, label = "Chile DAO", action = "Ver", classNa
           className="sr-only"
           style={{ fontSize: metrics.title }}>{items[active]?.title}</div>
       </div>
-      <p className="sr-only" id={instructionsId}>{ready ? 'Usa ↑ y ↓ o gira con la rueda del ratón. Arrastra verticalmente con ratón u horizontalmente en pantalla táctil. Inicio vuelve al círculo; Fin muestra el último afiche. Pulsa Enter o la barra espaciadora para abrir el afiche seleccionado.' : 'Afiches de archivo; no son convocatorias vigentes. Abre cada imagen para consultar el afiche completo.'}</p>
+      <p className="sr-only" id={instructionsId}>{ready ? 'Usa ↑ y ↓ o gira con la rueda del ratón. Arrastra verticalmente con ratón o en pantalla táctil. Después del último afiche, desliza hacia arriba para continuar a la línea de tiempo. Inicio vuelve al círculo; Fin muestra el último afiche. Pulsa Enter o la barra espaciadora para abrir el afiche seleccionado.' : 'Afiches de archivo; no son convocatorias vigentes. Abre cada imagen para consultar el afiche completo.'}</p>
       {showControls && <div ref={controlsRef} className="relative z-10 flex flex-col items-center p-1 text-center text-sm">
         <ol className="text-muted-foreground flex flex-wrap justify-center w-[352px] max-w-full max-[359px]:w-44 text-center leading-[1.75]"
           style={{ fontSize: metrics.index }} aria-label="Elegir actividad">

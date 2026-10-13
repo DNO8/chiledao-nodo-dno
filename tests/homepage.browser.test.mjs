@@ -9,6 +9,8 @@ import test from 'node:test';
 import { acquireOwnedBrowser, cleanupOwnedBrowser } from './helpers/browser-cleanup.mjs';
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '../dist');
+// A missing build is a prerequisite failure, never gesture behavior evidence.
+await access(join(root, 'index.html'));
 const temporary = join(tmpdir(), 'opencode');
 const browserPath = 'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe';
 const delay = (ms) => new Promise((done) => setTimeout(done, ms));
@@ -1520,6 +1522,254 @@ test('works wheel offscreen suspension', { timeout: 150000 }, async (t) => {
   }
 });
 
+test('mobile hero vertical navigation', { timeout: 150000 }, async (t) => {
+  await access(temporary); await access(browserPath);
+  const { hosted, profile, browser } = await acquireOwnedBrowser({ startServer: staticServer,
+    createProfile: () => mkdtemp(join(temporary, 'chiledao-vertical-profile-')),
+    startBrowser: profile => spawn(browserPath, [
+      '--headless=new', '--remote-debugging-address=127.0.0.1', '--remote-debugging-port=0',
+      `--user-data-dir=${profile}`, '--no-first-run', '--no-default-browser-check',
+      '--disable-background-networking', '--disable-component-update', '--disable-sync',
+      '--disable-default-apps', '--disable-extensions', '--no-proxy-server', 'about:blank',
+    ], { stdio: 'ignore', windowsHide: true }) });
+  let cdp, injection, primaryError;
+  const runtimeErrors = [];
+  try {
+    const port = await until(async () => {
+      try { return Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]); }
+      catch { return false; }
+    }, 'owned vertical browser port', 15000);
+    const page = (await (await fetch(`http://127.0.0.1:${port}/json/list`)).json()).find(p => p.type === 'page');
+    cdp = await connect(page.webSocketDebuggerUrl);
+    cdp.on('Runtime.exceptionThrown', ({ exceptionDetails }) => runtimeErrors.push(exceptionDetails.exception?.description ?? exceptionDetails.text));
+    cdp.on('Runtime.consoleAPICalled', ({ type, args }) => {
+      if (type === 'error') runtimeErrors.push(args.map(a => a.value ?? a.description).join(' '));
+    });
+    cdp.on('Fetch.requestPaused', async ({ requestId, request }) => {
+      const allowed = new URL(request.url).origin === hosted.origin;
+      await cdp.send(allowed ? 'Fetch.continueRequest' : 'Fetch.failRequest',
+        { requestId, ...(allowed ? {} : { errorReason: 'BlockedByClient' }) });
+    });
+    await cdp.send('Fetch.enable', { patterns: [{ urlPattern: '*' }] });
+    await cdp.send('Page.enable'); await cdp.send('Runtime.enable');
+    await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: true, maxTouchPoints: 2 });
+    const evaluate = async expression => {
+      const result = await cdp.send('Runtime.evaluate', { expression, returnByValue: true, awaitPromise: true });
+      assert.equal(result.exceptionDetails, undefined, JSON.stringify(result.exceptionDetails));
+      return result.result.value;
+    };
+    const load = async (width, source = '', motion = 'no-preference', measured = true) => {
+      if (injection) await cdp.send('Page.removeScriptToEvaluateOnNewDocument', { identifier: injection });
+      ({ identifier: injection } = await cdp.send('Page.addScriptToEvaluateOnNewDocument', { source: `${source}
+        window.__rows=[];window.__listeners=[];
+        const add=EventTarget.prototype.addEventListener,remove=EventTarget.prototype.removeEventListener;
+        EventTarget.prototype.addEventListener=function(type,callback,options){
+          if(['touchstart','touchmove','touchend','touchcancel','blur'].includes(type))
+            window.__listeners.push({target:this,type,callback,options,removed:false});
+          return add.call(this,type,callback,options);
+        };
+        EventTarget.prototype.removeEventListener=function(type,callback,options){
+          const row=window.__listeners.findLast(r=>r.target===this&&r.type===type&&r.callback===callback&&!r.removed);
+          if(row)row.removed=true;return remove.call(this,type,callback,options);
+        };
+        for(const type of ['touchstart','touchmove','touchend','touchcancel','pointercancel','gotpointercapture','lostpointercapture'])
+          document.addEventListener(type,e=>window.__rows.push({type,id:e.pointerId,trusted:e.isTrusted,
+            ids:Array.from(e.changedTouches??[]).map(t=>t.identifier),cancelable:e.cancelable,prevented:e.defaultPrevented,
+            time:e.timeStamp,observed:performance.now(),contacts:e.touches?.length??null,
+            changed:Array.from(e.changedTouches??[]).map(t=>({id:t.identifier,x:t.clientX,y:t.clientY,
+              target:{tag:t.target.tagName,id:t.target.id,gallery:!!t.target.closest?.('[data-works-stage]')}})),
+            targetId:e.target.id,closestStage:e.target.closest?.('[data-works-stage]')?.id??null,
+            stage:e.target.matches?.('[data-works-stage]'),tag:e.target.tagName}));` }));
+      await cdp.send('Emulation.setDeviceMetricsOverride', { width, height: 844, deviceScaleFactor: 1, mobile: true });
+      await cdp.send('Emulation.setEmulatedMedia', { features: [{ name: 'prefers-reduced-motion', value: motion }] });
+      await cdp.send('Page.navigate', { url: hosted.origin });
+      await until(() => evaluate(`(() => {const islands=[...document.querySelectorAll('astro-island')]
+        .filter(i=>/WorksWheelShowcase/.test(i.getAttribute('component-url'))),s=document.querySelector('[data-works-stage]');
+        return document.readyState==='complete'&&islands.length>0&&islands.every(i=>!i.hasAttribute('ssr'))
+          &&s?.getAttribute('role')==='${measured ? 'listbox' : 'group'}'${measured ? '&&Number(s.dataset.draws)>0' : ''};})()`), 'vertical actual hydration');
+      await evaluate(`void (window.__stage = document.querySelector('[data-works-stage]'))`);
+      await evaluate(`new Promise(done=>requestAnimationFrame(()=>requestAnimationFrame(done)))`);
+    };
+    const pose = () => evaluate(`(() => {const s=document.querySelector('[data-works-stage]');return {
+      turn:Number(s.dataset.turn),active:Number(s.querySelector('[aria-selected="true"]')?.dataset.workCard),
+      y:scrollY,action:getComputedStyle(s).touchAction,timeline:document.querySelector('#trayectoria').getBoundingClientRect().top,
+      draws:s.dataset.draws,connected:s.isConnected,root:s.closest('astro-island')?.getAttribute('component-url'),
+      stage:JSON.parse(JSON.stringify(s.getBoundingClientRect())),
+      visualViewport:visualViewport?{x:visualViewport.offsetLeft,y:visualViewport.offsetTop,w:visualViewport.width,h:visualViewport.height,scale:visualViewport.scale}:null,
+      observed:performance.now(),sameOwner:s===window.__stage,rows:window.__rows.slice(-32)};})()`);
+    const ownedListeners = () => evaluate(`window.__listeners.filter(r=>!r.removed
+      &&(r.target===window||r.target===window.__stage)).map(r=>({type:r.type,
+        stage:r.target===window.__stage,passive:r.options?.passive??null})).sort((a,b)=>a.type.localeCompare(b.type))`);
+    const reentryReceipt = (x,y) => evaluate(`(() => {
+      const s=document.querySelector('[data-works-stage]'),hit=document.elementFromPoint(${x},${y});
+      const rect=e=>{if(!e)return null;const r=e.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height};};
+      return {x:${x},y:${y},hit:{tag:hit?.tagName??null,id:hit?.id??null,
+        gallery:s.contains(hit),header:!!hit?.closest('header'),details:!!hit?.closest('[data-details-overlay]')},
+        stage:rect(s),hero:rect(document.querySelector('[data-works-showcase]')),header:rect(document.querySelector('header')),
+        details:rect(document.querySelector('[data-details-overlay]')),timeline:rect(document.querySelector('#trayectoria')),
+        turn:Number(s.dataset.turn),active:Number(s.querySelector('[aria-selected="true"]').dataset.workCard),
+        scroll:scrollY,sameOwner:s===window.__stage,rows:window.__rows.slice(-32)};
+    })()`);
+    const point = (image = false) => evaluate(`(() => {const s=document.querySelector('[data-works-stage]');
+      // The mobile details sibling covers the full stage's center in drum mode.
+      // Start ordinary gallery gestures at the visible selected poster's center.
+      const usePoster=${image}||s.closest('[data-works-showcase]').dataset.mode==='drum';
+      const e=usePoster?s.querySelector('[aria-selected="true"] img'):s,r=e.getBoundingClientRect();
+      const x=r.x+r.width/2,y=usePoster?r.y+r.height/2:Math.max(200,Math.min(600,r.y+r.height/2));
+      const rect=e=>{if(!e)return null;const r=e.getBoundingClientRect();return {x:r.x,y:r.y,w:r.width,h:r.height};};
+      const describe=e=>({tag:e?.tagName??null,id:e?.id??null,details:!!e?.closest('[data-details-overlay]')});
+      const hit=document.elementFromPoint(x,y),poster=s.querySelector('[aria-selected="true"] img'),pr=rect(poster);
+      const px=pr?pr.x+pr.w/2:null,py=pr?pr.y+pr.h/2:null,posterHit=pr?document.elementFromPoint(px,py):null;
+      return {x,y,tag:hit?.tagName,hit:s.contains(hit),hitNode:describe(hit),stage:rect(s),poster:pr,
+        posterCenter:{x:px,y:py,hit:describe(posterHit),inside:s.contains(posterHit),visible:!!pr&&px>0&&px<innerWidth&&py>0&&py<innerHeight},
+        details:rect(document.querySelector('[data-details-overlay]')),turn:Number(s.dataset.turn),
+        mode:s.closest('[data-works-showcase]').dataset.mode,sameOwner:s===window.__stage};})()`);
+    const touch = (type, p) => cdp.send('Input.dispatchTouchEvent',
+      { type, touchPoints: p ? [{ x:p.x,y:p.y,id:1,radiusX:2,radiusY:2 }] : [] });
+    const swipe = async (distance, image = false, horizontal = false) => {
+      const p = await point(image); assert.equal(p.hit, true,JSON.stringify(p));
+      if (image || p.mode==='drum') {
+        assert.equal(p.tag, 'IMG');
+        assert.equal(p.posterCenter.visible,true,JSON.stringify(p));
+      }
+      t.diagnostic(`Native gesture start: ${JSON.stringify({turn:p.turn,x:p.x,y:p.y,hit:p.hitNode,sameOwner:p.sameOwner})}`);
+      await evaluate('window.__rows=[]'); await touch('touchStart', p);
+      for (let step=1;step<=7;step++) {
+        await touch('touchMove', { x:p.x-(horizontal ? distance*step/7 : 0), y:p.y-(horizontal ? 0 : distance*step/7) });
+        await delay(30);
+      }
+      await touch('touchEnd');
+    };
+    const selected = async turn => {
+      await until(async () => (await pose()).turn === turn, `native vertical turn ${turn}`);
+      const state = await pose(); assert.equal(state.active, Math.max(0,turn-1));
+      assert.equal(state.y, 0, 'owned gallery gesture does not pan the page');
+      const down=state.rows.find(r=>r.type==='touchstart'),moves=state.rows.filter(r=>r.type==='touchmove');
+      assert.ok(down?.trusted); assert.ok(moves.length>0);
+      assert.ok(moves.every(r=>r.trusted&&r.cancelable&&r.prevented&&r.ids.includes(down.ids[0])));
+      assert.equal(state.sameOwner,true,'touch transport retains the actual stage owner');
+      assert.equal(state.action,'auto');
+      t.diagnostic(`Native vertical: ${JSON.stringify(state)}`);
+    };
+    for (const width of [320,390]) for (const unsupported of [false,true]) await t.test(`${width}, directional unsupported=${unsupported}: repeated swipes and native boundaries`, async () => {
+      await load(width,unsupported ? 'CSS.supports=()=>false;' : '');
+      const listeners=await ownedListeners();
+      assert.ok(listeners.some(r=>r.type==='touchmove'&&r.stage&&r.passive===false));
+      await swipe(175); await selected(1);
+      const p=await point(true); await touch('touchStart', p); await touch('touchEnd');
+      await until(() => evaluate(`document.activeElement.matches('[data-works-stage]')`), 'ordinary IMG tap focuses existing owner');
+      assert.equal((await pose()).turn,1);
+      await swipe(175,true); await selected(2);
+      await swipe(-175,true); await selected(1);
+      await swipe(175,true); await selected(2);
+      for(let turn=3;turn<=8;turn++) { await swipe(175); await selected(turn); }
+      await swipe(-175,true); await selected(7);
+      await swipe(175,true); await selected(8);
+      await swipe(175);
+      await until(async () => (await pose()).y>30, 'last outward native page escape');
+      const escaped=await pose(); assert.equal(escaped.turn,8);
+      assert.ok(escaped.timeline<844,'native page travel reveals the timeline');
+      assert.ok(escaped.rows.some(r=>r.type==='pointercancel'&&r.trusted));
+      assert.ok(escaped.rows.filter(r=>r.type==='touchmove').every(r=>!r.prevented),'outward movement is browser-owned');
+      assert.deepEqual(await ownedListeners(),listeners,'completed gestures retire transient listeners');
+      t.diagnostic(`Last native escape: ${JSON.stringify(escaped)}`);
+      // The header remains outside the full-width gallery, even after page travel.
+      const browserPoint=await evaluate(`(() => {const h=document.querySelector('header'),r=h.getBoundingClientRect();
+        const x=r.x+r.width/2,y=r.y+r.height/2,hit=document.elementFromPoint(x,y);
+        return {x,y,header:h.contains(hit),gallery:window.__stage.contains(hit),tag:hit?.tagName};})()`);
+      assert.equal(browserPoint.header,true,JSON.stringify(browserPoint));
+      assert.equal(browserPoint.gallery,false,JSON.stringify(browserPoint));
+      await evaluate('void (window.__rows=[])');
+      t.diagnostic(`Reentry before: ${JSON.stringify(await reentryReceipt(browserPoint.x,browserPoint.y))}`);
+      await touch('touchStart',browserPoint);
+      for(let step=1;step<=7;step++) {
+        await touch('touchMove',{x:browserPoint.x,y:browserPoint.y+600*step/7});
+        await delay(30);
+      }
+      await touch('touchEnd');
+      await until(() => evaluate('scrollY===0'), 'native page reentry');
+      const reentered=await reentryReceipt(browserPoint.x,browserPoint.y);
+      assert.equal(reentered.turn,8,'native page reentry retains the last gallery selection');
+      assert.equal(reentered.active,7);
+      const pageMoves=reentered.rows.filter(r=>r.type==='touchmove');
+      assert.ok(pageMoves.length>0&&pageMoves.every(r=>r.trusted&&!r.prevented),'header page gesture stays native');
+      t.diagnostic(`Reentry after: ${JSON.stringify(reentered)}`);
+      t.diagnostic(`Post-reentry reverse before: ${JSON.stringify(await pose())}`);
+      await swipe(-175,true);
+      t.diagnostic(`Post-reentry reverse released: ${JSON.stringify(await pose())}`);
+      try { await selected(7); }
+      catch(error) {
+        t.diagnostic(`Post-reentry reverse failed: ${JSON.stringify(await pose())}`);
+        throw error;
+      }
+      await load(width); await evaluate(`scrollTo({top:80,behavior:'instant'})`);
+      await swipe(-175);
+      await until(() => evaluate('scrollY<50'), 'initial outward native escape');
+      assert.equal((await pose()).turn,0);
+      const initialEscape=await pose();
+      assert.ok(initialEscape.rows.filter(r=>r.type==='touchmove').every(r=>r.trusted&&!r.prevented));
+      t.diagnostic(`Initial native escape: ${JSON.stringify(initialEscape)}`);
+    });
+    await t.test('initial and live reduction, horizontal native pan and capability fallback', async () => {
+      await load(390,'','reduce'); await swipe(175); await selected(1);
+      await cdp.send('Emulation.setEmulatedMedia', {features:[{name:'prefers-reduced-motion',value:'no-preference'}]});
+      await swipe(175,true); await selected(2);
+      await swipe(100,false,true); await delay(200);
+      assert.equal((await pose()).turn,2,'horizontal native gesture cannot select a poster');
+      for(const source of ['window.ResizeObserver=undefined;', 'window.TouchEvent=undefined;']) {
+        await load(390,source,'no-preference',!source.includes('ResizeObserver')); await swipe(175);
+        await until(() => evaluate('scrollY>30'), 'fallback retains native vertical page travel');
+        assert.equal((await pose()).turn,0);
+      }
+      assert.deepEqual(cdp.errors,[]);
+    });
+    await t.test('native cancellation, foreign pointer isolation, multitouch arrival and disposal', async () => {
+      await load(390); await swipe(175); await selected(1);
+      const baseline=await ownedListeners(),p=await point(true);
+      const hold = async () => {
+        await evaluate('window.__rows=[]'); await touch('touchStart',p);
+        await touch('touchMove',{x:p.x,y:p.y-35});
+        await until(async () => (await pose()).turn>1,'native held contact changes pose');
+      };
+      await hold();
+      await evaluate(`window.__stage.dispatchEvent(new PointerEvent('pointercancel',{bubbles:true,pointerId:1,pointerType:'touch'}))`);
+      await touch('touchMove',{x:p.x,y:p.y-70});
+      await until(async () => (await pose()).turn>1.15,'foreign PointerEvent cannot retire Touch.identifier owner');
+      await touch('touchCancel');
+      await until(async () => (await pose()).turn===1,'native cancel restores starting poster without phantom advance');
+      assert.ok((await pose()).rows.some(r=>r.type==='touchcancel'&&r.trusted));
+      assert.deepEqual(await ownedListeners(),baseline);
+      await hold();
+      const second={x:388,y:780,id:2,radiusX:2,radiusY:2};
+      await cdp.send('Input.dispatchTouchEvent',{type:'touchStart',touchPoints:[{x:p.x,y:p.y-35,id:1},second]});
+      await until(async () => (await pose()).turn===1,'outside joining contact retires gallery ownership');
+      await cdp.send('Input.dispatchTouchEvent',{type:'touchMove',touchPoints:[{x:p.x-25,y:p.y-60,id:1},{...second,x:360,y:800}]});
+      await cdp.send('Input.dispatchTouchEvent',{type:'touchEnd',touchPoints:[]});
+      assert.equal((await pose()).turn,1,'multitouch never selects another poster');
+      assert.ok((await pose()).rows.filter(r=>r.type==='touchmove').at(-1)?.prevented===false,'multitouch stays native');
+      assert.deepEqual(await ownedListeners(),baseline);
+      for(const retirement of ['blur','readiness','unmount']) {
+        await load(390); await swipe(175); await selected(1);
+        const listeners=await ownedListeners();
+        const p=await point(true); await touch('touchStart',p); await touch('touchMove',{x:p.x,y:p.y-35});
+        if(retirement==='blur') await evaluate(`dispatchEvent(new Event('blur'))`);
+        else if(retirement==='readiness') await evaluate(`window.__stage.style.height='0px'`);
+        else await evaluate(`window.__stage.closest('astro-island').remove()`);
+        await until(async () => JSON.stringify((await ownedListeners()).filter(r=>!r.stage))
+          ===JSON.stringify(listeners.filter(r=>!r.stage)),'transient touch listeners disposed');
+        if(retirement!=='blur') await until(async () => !(await ownedListeners()).some(r=>r.stage),'native element adapter disposed');
+        await touch('touchCancel');
+      }
+    });
+    assert.deepEqual(runtimeErrors,[], 'mobile matrix has no runtime or console errors');
+    assert.deepEqual(cdp.errors,[]);
+  } catch (error) { primaryError = error; throw error; }
+  finally {
+    await cleanupOwnedBrowser({browser,cdp,server:hosted.server,primaryError,
+      report:result=>t.diagnostic(`Owned cleanup: exited=${result.exited}; errors=${result.errors.map(e=>e.message).join('; ')}`)});
+  }
+});
+
 test('works wheel input ownership', { timeout: 150000 }, async (t) => {
   await access(temporary);
   await access(browserPath);
@@ -1570,7 +1820,7 @@ test('works wheel input ownership', { timeout: 150000 }, async (t) => {
         window.__windowListeners=[];
         const add=window.addEventListener,remove=window.removeEventListener;
         window.addEventListener=function(type,callback,...rest){
-          if(['pointerup','pointercancel','pointermove','blur'].includes(type))
+          if(['pointerup','pointercancel','pointermove','touchstart','touchend','touchcancel','blur'].includes(type))
             window.__windowListeners.push({type,callback,removed:false});
           return add.call(this,type,callback,...rest);
         };
@@ -1578,7 +1828,7 @@ test('works wheel input ownership', { timeout: 150000 }, async (t) => {
           const row=window.__windowListeners.findLast(r=>r.type===type&&r.callback===callback&&!r.removed);
           if(row)row.removed=true;return remove.call(this,type,callback,...rest);
         };
-        for(const type of ['pointerdown','pointermove','pointerup','pointercancel','gotpointercapture','lostpointercapture','wheel','keydown'])
+        for(const type of ['pointerdown','pointermove','pointerup','pointercancel','touchstart','touchmove','touchend','touchcancel','gotpointercapture','lostpointercapture','wheel','keydown'])
           document.addEventListener(type,e=>{
             const stage=e.target.closest?.('[data-works-stage]');
             if(type==='pointerdown'&&stage&&e.isTrusted)window.__owner=e.pointerId;
@@ -1748,7 +1998,7 @@ test('works wheel input ownership', { timeout: 150000 }, async (t) => {
       clean();
     });
 
-    await t.test('real touch horizontal drag and cancellation preserve vertical native page pan', async () => {
+    await t.test('real touch vertical drag and cancellation preserve boundary native page pan', async () => {
       await cdp.send('Emulation.setDeviceMetricsOverride', {width:390,height:844,deviceScaleFactor:1,mobile:true});
       await cdp.send('Emulation.setTouchEmulationEnabled', {enabled:true,maxTouchPoints:2});
       await load(); await until(() => evaluate(`Number(document.querySelector('[data-works-stage]').dataset.draws)>0`), 'mobile measured ring');
@@ -1764,22 +2014,23 @@ test('works wheel input ownership', { timeout: 150000 }, async (t) => {
       await until(async () => Number((await pose()).turn) === 1, 'mobile front artwork selected');
       const artwork = await artworkPoint(); assert.ok(artwork, 'touch hits the actual front image');
       await touch('touchStart', {x:artwork.x,y:artwork.y});
-      await touch('touchMove', {x:artwork.x-35,y:artwork.y});
-      await touch('touchMove', {x:artwork.x-70,y:artwork.y});
-      await until(async () => Number((await pose()).turn) > 1.15, 'real horizontal artwork touch survives implicit capture transfer');
+      await touch('touchMove', {x:artwork.x,y:artwork.y-35});
+      await touch('touchMove', {x:artwork.x,y:artwork.y-70});
+      await until(async () => Number((await pose()).turn) > 1.15, 'real vertical artwork contact feeds the shared controller');
       assert.equal(await evaluate(`window.__inputRows.filter(r=>r.type==='pointerdown'&&r.trusted).at(-1).stageTarget`), false,
         'touch begins on artwork descendant, not the stage itself');
       await touch('touchCancel'); await delay(200);
       assert.equal((await pose()).captured, false);
+      assert.equal((await pose()).turn,'1','cancelled contact restores the starting artwork');
       assert.deepEqual(await liveListeners(), listeners, 'native touch cancellation disposes ownership');
-      assert.equal(await evaluate(`window.__inputRows.some(r=>r.type==='pointercancel'&&r.trusted)`), true, 'native pointercancel receipt');
-      await evaluate(`document.querySelector('[data-works-stage]').focus({preventScroll:true})`); await key('Home');
+      assert.equal(await evaluate(`window.__inputRows.some(r=>r.type==='touchcancel'&&r.trusted)`), true, 'native TouchEvent cancellation receipt');
+      await evaluate(`document.querySelector('[data-works-stage]').focus({preventScroll:true})`); await key('End');
       await delay(100); const y = await evaluate('scrollY');
       await touch('touchStart', p);
       for(let step=1;step<=5;step++) {await touch('touchMove', {x:p.x,y:p.y-step*25}); await delay(30);}
       await touch('touchEnd'); await delay(250);
       assert.ok(await evaluate('scrollY')>y+30, 'vertical touch on hero actually pans native page');
-      assert.equal((await pose()).turn, '0', 'vertical page pan never selects an artwork');
+      assert.equal((await pose()).turn, '8', 'outward page pan retains the last artwork');
       assert.deepEqual(await liveListeners(), listeners);
       clean();
     });
@@ -5784,10 +6035,10 @@ test('real browser verifies supplied works wheel, synchronized details and progr
     await wheelSelected(1);
     assert.equal((await wheelState()).turn, 2, 'reduced motion skips interpolation');
     const touchPoint = await center('[data-works-stage]');
-    const startX = touchPoint.x + 100;
-    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: startX, y: touchPoint.y }] });
+    const startY = touchPoint.y + 100;
+    await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x: touchPoint.x, y: startY }] });
     for (let step = 1; step <= 10; step += 1) {
-      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: startX - 250 * step / 10, y: touchPoint.y }] });
+      await cdp.send('Input.dispatchTouchEvent', { type: 'touchMove', touchPoints: [{ x: touchPoint.x, y: startY - 250 * step / 10 }] });
       await delay(20);
     }
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
@@ -5801,8 +6052,8 @@ test('real browser verifies supplied works wheel, synchronized details and progr
       await delay(20);
     }
     await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
-    await until(() => evaluate(`scrollY > ${scrollBeforeTouch} + 20`), 'native vertical touch page travel');
-    await wheelSelected(2);
+    assert.equal(await evaluate('scrollY'),scrollBeforeTouch,'interior vertical gallery gesture retains page position');
+    await wheelSelected(3);
     await center('#inicio h1');
     await capture('mobile');
     await click('#faq summary');
